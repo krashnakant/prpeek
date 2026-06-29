@@ -1,53 +1,116 @@
 # PRPeek
 
-macOS menubar watcher for open GitHub PRs. Shows a color-coded "waiting on me"
-count, notifies on review requests / CI failures, opens PRs in the browser.
+A native macOS menubar app that watches your open GitHub pull requests — across
+your personal repos **and** every org you're in — and tells you, at a glance,
+which ones are **waiting on you**.
 
-## Build & run
+![CI](https://github.com/krashnakant/prpeek/actions/workflows/ci.yml/badge.svg)
+&nbsp;macOS 26 (Tahoe)+ · Swift 6 · MIT
 
-```bash
-swift test                       # 41 tests
-bash Scripts/make-app.sh         # builds PRPeek.app (ad-hoc signed)
-open PRPeek.app                  # menubar icon appears (top-right)
+PRs scatter across tabs and orgs. PRPeek puts a single color-coded count in your
+menu bar: red with a number when something needs your review or your CI is red,
+calm when you're at inbox zero. No browser tab-hopping.
+
+> Prior art, honestly: [Trailer](https://github.com/ptsochantaris/trailer) covers
+> this category and is excellent. PRPeek is smaller and opinionated — it makes
+> "waiting on me" the headline, not a setting.
+
+## Features
+
+- **Glanceable menubar badge** — a red pill with the count of PRs waiting on you;
+  monochrome count when none; checkmark at inbox zero.
+- **Three views** — `Needs me` (review requested of you, or your PR with failing
+  CI), `Mine` (you authored), `Others` (involved but neither).
+- **Precise "waiting on me"** — excludes drafts, honors live review requests
+  (incl. team requests via your team memberships), and your own PRs with a failed
+  required/any check. The badge doesn't lie.
+- **Native notifications** — fires only on the transition (review requested, your
+  CI fails), deduped, no storm on launch. Click → opens the PR.
+- **Two ways to sign in** — paste a PAT, or OAuth device flow (no client secret).
+  Token stored in the Keychain.
+- **Cheap polling** — one GitHub Search query (`involves:@me`) covers all repos
+  with zero enumeration; ETag conditional requests make idle polls nearly free;
+  a concurrency cap keeps the per-PR checks fan-out under the secondary rate limit.
+- **Laptop-aware** — pauses on sleep, refreshes once on wake (no backlog burst),
+  holds when offline and shows cached PRs, backs off when rate-limited.
+- **Instant launch** — last PRs restored from an atomic JSON cache before the
+  first poll returns.
+
+## How it works
+
+Logic lives in a fully-tested `PRPeekCore` library; the AppKit shell is thin.
+
+```
+ GitHub REST API
+        ▲  │ ETag / 304 (idle polls ~free)
+        │  ▼
+ GitHubClient (actor) ──► SearchService  is:pr is:open involves:@me
+   token in Keychain          │
+        ▲                     ▼
+        │            RefreshEngine ──► per-PR enrich (detail + check-runs)
+        │              (one coalesced     │  concurrency-capped
+        │               pass)             ▼
+        │                         Classifier → waiting-on-me + CI rollup
+        │                                 │
+   JSONStore (atomic cache) ◄── persist ──┤
+                                          ▼
+                       @MainActor AppModel  ──►  NotificationPlanner (edge-fire)
+                            │  (state + epoch guard + backoff)
+              ┌─────────────┼──────────────┐
+              ▼             ▼               ▼
+        menubar badge   dropdown menu   macOS notifications
+        (NSImage)       (3 sections)
+
+ LifecycleMonitor: NSWorkspace sleep/wake + NWPathMonitor → drives the poll loop
 ```
 
-Sign in two ways:
+Key design decisions (full record in `CONTRIBUTING.md` + the design doc):
+- **Search backbone, not an org crawler.** `involves:@me` returns your PRs across
+  everything the token sees — no per-repo/org enumeration.
+- **Codable JSON file, not SwiftData.** Avoids the actor/`ModelContext` threading
+  trap for a small dataset; schema-versioned with corrupt-file recovery.
+- **Account-scoped correctness.** The ETag cache flushes on token change and an
+  epoch guard discards in-flight refreshes after sign-out, so no data leaks across
+  accounts.
 
-### Option A — Paste a token (works immediately)
-Menubar ▸ **Paste token…** → paste a PAT with `repo` + `read:org`
-(fine-grained or classic). Done.
+## Install
 
-### Option B — Sign in with GitHub (device flow)
-Requires a one-time OAuth App registration (the client id is public — device
-flow needs no secret):
+**From a release:** download `PRPeek.dmg` from
+[Releases](https://github.com/krashnakant/prpeek/releases), drag to Applications.
+The DMG is ad-hoc signed (not yet notarized) — first launch: **right-click ▸ Open**.
 
-1. github.com ▸ **Settings ▸ Developer settings ▸ OAuth Apps ▸ New OAuth App**
-2. Fill in:
-   - Application name: `PRPeek`
-   - Homepage URL: anything (e.g. `https://github.com/you/prpeek`)
-   - Authorization callback URL: same as homepage (device flow ignores it, but the field is required)
-3. **Register application**, then on the app page check **Enable Device Flow** and Save.
-4. Copy the **Client ID** (looks like `Ov23li…`).
-5. Rebuild with it baked in:
-   ```bash
-   PRPEEK_CLIENT_ID=Ov23li... bash Scripts/make-app.sh
-   open PRPeek.app
-   ```
-6. Menubar ▸ **Sign in with GitHub** → the code is copied to your clipboard and
-   the pre-filled GitHub page opens → click **Authorize**. The app polls and
-   signs in automatically (watch the menu status row).
+**From source:**
+```bash
+git clone https://github.com/krashnakant/prpeek.git
+cd prpeek
+bash Scripts/make-app.sh && open PRPeek.app
+```
 
-Scopes requested: `repo read:org`.
+Requires macOS 26 (Tahoe)+ and Xcode 26+.
 
-## Architecture
-- `PRPeekCore` — all logic, fully unit-tested (`swift test`):
-  `GitHubClient` (ETag/304/pagination/typed errors), `JSONStore` (atomic +
-  schema recovery), `Auth` (device flow + Keychain), `SearchService`
-  (`involves:@me` backbone), `Classifier` (waiting-on-me + CI), `RefreshEngine`
-  (coalesced pass + concurrency cap), `NotificationPlanner` (edge-fire + dedup).
-- `PRPeek` — AppKit menubar app: badge, menu, lifecycle (sleep/wake +
-  NWPathMonitor), notifications.
+## Usage
 
-## Deferred (v1.1+)
-Approve/comment write-actions; pinned-repo `[All]` for repos you're not involved
-in; live search box; Developer ID notarization + Homebrew cask.
+Click the menubar icon → sign in:
+- **Paste token…** — a GitHub PAT (classic with `repo` + `read:org`, or a
+  fine-grained token with PR read + org read). Works immediately.
+- **Sign in with GitHub** — register an OAuth App (Settings ▸ Developer settings,
+  enable Device Flow), then build with `PRPEEK_CLIENT_ID=<id>`. Device flow copies
+  a code and opens the pre-filled GitHub page.
+
+The badge turns red with your "needs me" count; click any PR to open it.
+
+## Roadmap
+
+- Approve / comment actions from the menu (with confirm) — v1.1
+- Pinned-repo `[All]` coverage for repos you're not involved in — v1.1
+- Notarized DMG (Developer ID) for friction-free install
+- Live filter/search box in the dropdown
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). `swift test` must stay green; CI runs it
+on every PR.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

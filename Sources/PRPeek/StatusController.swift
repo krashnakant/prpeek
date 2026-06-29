@@ -35,9 +35,14 @@ final class StatusController: NSObject {
             menu.addItem(action("Sign in with GitHub…", #selector(signIn)))
             menu.addItem(action("Paste token…", #selector(pasteToken)))
         } else {
+            // F3: "All" was a superset of the first two -> every PR shown up to 3×.
+            // Third section is the remainder so each PR appears once.
+            let needIDs = Set(model.needsMe.map(\.id))
+            let mineIDs = Set(model.mine.map(\.id))
+            let others = model.all.filter { !needIDs.contains($0.id) && !mineIDs.contains($0.id) }
             section(menu, "Needs me", model.needsMe)
             section(menu, "Mine", model.mine)
-            section(menu, "All", model.all)
+            section(menu, "Others", others)
             menu.addItem(.separator())
             menu.addItem(action("Refresh now", #selector(refresh)))
             menu.addItem(action("Sign out", #selector(signOut)))

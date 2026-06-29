@@ -7,12 +7,13 @@ import AppKit
 /// siblings update in place via `refresh()` (no full menu rebuild).
 final class MenuToggleView: NSView {
     private let title: String
+    private let tint: NSColor?      // Catppuccin text color; nil = system label color
     private let isOn: () -> Bool
     private let action: () -> Void
     private var hovered = false
 
-    init(title: String, isOn: @escaping () -> Bool, action: @escaping () -> Void) {
-        self.title = title; self.isOn = isOn; self.action = action
+    init(title: String, tint: NSColor? = nil, isOn: @escaping () -> Bool, action: @escaping () -> Void) {
+        self.title = title; self.tint = tint; self.isOn = isOn; self.action = action
         let font = NSFont.menuFont(ofSize: 0)
         let w = (title as NSString).size(withAttributes: [.font: font]).width
         super.init(frame: NSRect(x: 0, y: 0, width: ceil(w) + 46, height: 22))
@@ -32,7 +33,7 @@ final class MenuToggleView: NSView {
             NSColor.selectedContentBackgroundColor.setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 1), xRadius: 5, yRadius: 5).fill()
         }
-        let color: NSColor = hovered ? .selectedMenuItemTextColor : .labelColor
+        let color: NSColor = hovered ? .selectedMenuItemTextColor : (tint ?? .labelColor)
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: color]
         if isOn() { ("✓" as NSString).draw(at: NSPoint(x: 14, y: 3), withAttributes: attrs) }
         (title as NSString).draw(at: NSPoint(x: 30, y: 3), withAttributes: attrs)

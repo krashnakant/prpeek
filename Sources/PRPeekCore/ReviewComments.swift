@@ -99,8 +99,10 @@ public extension GitHubClient {
     /// On-demand (NOT in the refresh loop): a PR's review thread. Two conditional,
     /// paginated GETs merged into a timeline. ETag-cached like every other read.
     func reviewThread(owner: String, repo: String, number: Int) async throws -> [ReviewComment] {
-        let reviews: [ReviewDTO] = try await getCollection(path: "/repos/\(owner)/\(repo)/pulls/\(number)/reviews")
-        let comments: [ReviewCommentDTO] = try await getCollection(path: "/repos/\(owner)/\(repo)/pulls/\(number)/comments")
-        return ReviewThread.merge(reviews: reviews, comments: comments)
+        // Two independent round-trips — overlap them (getCollection suspends at its
+        // network await, releasing the actor), so latency is max(RTT) not the sum.
+        async let reviews: [ReviewDTO] = getCollection(path: "/repos/\(owner)/\(repo)/pulls/\(number)/reviews")
+        async let comments: [ReviewCommentDTO] = getCollection(path: "/repos/\(owner)/\(repo)/pulls/\(number)/comments")
+        return try await ReviewThread.merge(reviews: reviews, comments: comments)
     }
 }

@@ -103,8 +103,8 @@ final class DesktopPanel {
         out.append(line("\n\nMine \(model.mine.count) · Open \(model.all.count)",
                         font: .systemFont(ofSize: 11), color: sub))
         if let updated = model.lastUpdated {
-            let f = DateFormatter(); f.timeStyle = .short
-            out.append(line("\nUpdated \(f.string(from: updated))", font: .systemFont(ofSize: 10), color: sub))
+            out.append(line("\nUpdated \(StatusController.shortTime.string(from: updated))",
+                            font: .systemFont(ofSize: 10), color: sub))
         }
         return out
     }

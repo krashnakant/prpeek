@@ -32,10 +32,10 @@ enum Theme: String, CaseIterable {
     var palette: Palette? {
         switch self {
         case .system, .light, .dark: return nil
-        case .latte:     return Palette(text: "#4c4f69", subtext: "#6c6f85", green: "#40a02b", red: "#d20f39", yellow: "#df8e1d", accent: "#8839ef")
-        case .frappe:    return Palette(text: "#c6d0f5", subtext: "#a5adce", green: "#a6d189", red: "#e78284", yellow: "#e5c890", accent: "#ca9ee6")
-        case .macchiato: return Palette(text: "#cad3f5", subtext: "#a5adcb", green: "#a6da95", red: "#ed8796", yellow: "#eed49f", accent: "#c6a0f6")
-        case .mocha:     return Palette(text: "#cdd6f4", subtext: "#a6adc8", green: "#a6e3a1", red: "#f38ba8", yellow: "#f9e2af", accent: "#cba6f7")
+        case .latte:     return Palette(text: "#4c4f69", subtext: "#6c6f85", green: "#40a02b", red: "#d20f39", yellow: "#df8e1d")
+        case .frappe:    return Palette(text: "#c6d0f5", subtext: "#a5adce", green: "#a6d189", red: "#e78284", yellow: "#e5c890")
+        case .macchiato: return Palette(text: "#cad3f5", subtext: "#a5adcb", green: "#a6da95", red: "#ed8796", yellow: "#eed49f")
+        case .mocha:     return Palette(text: "#cdd6f4", subtext: "#a6adc8", green: "#a6e3a1", red: "#f38ba8", yellow: "#f9e2af")
         }
     }
 
@@ -45,11 +45,11 @@ enum Theme: String, CaseIterable {
 }
 
 struct Palette {
-    let text, subtext, green, red, yellow, accent: NSColor
-    init(text: String, subtext: String, green: String, red: String, yellow: String, accent: String) {
+    let text, subtext, green, red, yellow: NSColor
+    init(text: String, subtext: String, green: String, red: String, yellow: String) {
         self.text = NSColor(hex: text); self.subtext = NSColor(hex: subtext)
         self.green = NSColor(hex: green); self.red = NSColor(hex: red)
-        self.yellow = NSColor(hex: yellow); self.accent = NSColor(hex: accent)
+        self.yellow = NSColor(hex: yellow)
     }
 }
 

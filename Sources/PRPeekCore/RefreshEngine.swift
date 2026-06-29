@@ -43,7 +43,7 @@ public struct RefreshEngine: Sendable {
     }
 
     private func enrich(_ pr: PullRequest, viewer: ViewerContext) async throws -> PullRequest {
-        let (owner, repo) = Self.split(pr.repoFullName)
+        let (owner, repo) = pr.ownerRepo
         let detail = try await client.pullDetail(owner: owner, repo: repo, number: pr.number)
         let ci = try await client.ciState(owner: owner, repo: repo, sha: detail.headSHA)
         // qualify team slugs with the repo owner (the org) to match viewer team keys
@@ -57,10 +57,5 @@ public struct RefreshEngine: Sendable {
         out.ciState = ci
         out.waitingOnMe = waiting
         return out
-    }
-
-    static func split(_ fullName: String) -> (owner: String, repo: String) {
-        let parts = fullName.split(separator: "/", maxSplits: 1).map(String.init)
-        return (parts.first ?? "", parts.count > 1 ? parts[1] : "")
     }
 }

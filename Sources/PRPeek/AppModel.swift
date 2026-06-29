@@ -35,6 +35,9 @@ final class AppModel {
     private(set) var state: PRPeekState
     private(set) var status: AppStatus = .signedOut
     private(set) var theme: Theme = .system
+    /// Parsed once per theme change, not re-derived on every menu render (the
+    /// Catppuccin palette parses 6 hex strings).
+    private(set) var palette: Palette?
     private var viewer: ViewerContext?
     private var previousPRs: [PullRequest] = []
     private var seenRepos: Set<String> = []   // every repo seen this session (for the filter picker)
@@ -63,11 +66,11 @@ final class AppModel {
     /// the controller can repopulate just that submenu (no full menu rebuild).
     var onSubmenuReload: (@MainActor (String) -> Void)?
 
-    // Review comments + commits are fetched on demand (submenu open), never in the loop.
-    private var commentsByPR: [String: [ReviewComment]] = [:]
-    private var loadingComments: Set<String> = []
-    private var commitsByPR: [String: [Commit]] = [:]
-    private var loadingCommits: Set<String> = []
+    // Review comments + commits are fetched on demand (submenu open), never in the
+    // loop. Caches capture the GitHubClient actor (not self) so the fetch closures
+    // are @Sendable — initialized in init once `client` exists.
+    private let commentsCache: PerPRLazyCache<[ReviewComment]>
+    private let commitsCache: PerPRLazyCache<[Commit]>
 
     // Views
     var needsMe: [PullRequest] { state.pullRequests.filter(\.waitingOnMe) }
@@ -103,6 +106,7 @@ final class AppModel {
         self.previousPRs = state.pullRequests
         self.seenRepos = Set(state.pullRequests.map(\.repoFullName))
         self.theme = UserDefaults.standard.string(forKey: "theme").flatMap(Theme.init) ?? .system
+        self.palette = theme.palette
         Theme.apply(theme)
         if let secs = UserDefaults.standard.object(forKey: "refreshIntervalSecs") as? Int, secs > 0 {
             self.refreshIntervalSecs = secs
@@ -115,6 +119,13 @@ final class AppModel {
         self.hasToken = readOK && token != nil
         self.client = GitHubClient(transport: URLSessionTransport(), token: token)
         self.engine = RefreshEngine(client: client)
+        let client = self.client   // capture the actor, not self, for the @Sendable fetch closures
+        self.commentsCache = PerPRLazyCache { o, r, n in
+            (try? await client.reviewThread(owner: o, repo: r, number: n)) ?? []
+        }
+        self.commitsCache = PerPRLazyCache { o, r, n in
+            (try? await client.commits(owner: o, repo: r, number: n)) ?? []
+        }
         // Locked (readOK false) -> .loading so the loop retries; don't claim signed-out.
         self.status = (readOK && token == nil) ? .signedOut : .loading
     }
@@ -202,53 +213,24 @@ final class AppModel {
         }
     }
 
-    // MARK: - Review comments (lazy, per-PR)
+    // MARK: - Review comments + commits (lazy, per-PR)
+    // nil from value(for:) = not loaded yet; non-nil = loaded (may be empty).
 
-    /// nil = not loaded yet; [] = loaded, none. Drives the submenu state.
-    func comments(for pr: PullRequest) -> [ReviewComment]? { commentsByPR[pr.id] }
-    func isLoadingComments(_ pr: PullRequest) -> Bool { loadingComments.contains(pr.id) }
-
-    /// Fetch a PR's review thread once and cache it. No-op if cached/in-flight.
+    func comments(for pr: PullRequest) -> [ReviewComment]? { commentsCache.value(for: pr) }
+    func isLoadingComments(_ pr: PullRequest) -> Bool { commentsCache.isLoading(pr) }
     func loadComments(for pr: PullRequest) {
-        guard commentsByPR[pr.id] == nil, !loadingComments.contains(pr.id) else { return }
-        loadingComments.insert(pr.id)
-        let id = pr.id, number = pr.number, (owner, repo) = Self.split(pr.repoFullName), myEpoch = epoch
-        Task { [weak self] in
-            guard let self else { return }
-            let thread = (try? await self.client.reviewThread(owner: owner, repo: repo, number: number)) ?? []
-            guard myEpoch == self.epoch else { return }   // account switched mid-flight: discard
-            self.loadingComments.remove(id)
-            self.commentsByPR[id] = thread
-            self.onSubmenuReload?(id)
-        }
+        commentsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
     }
 
-    /// nil = not loaded; [] = loaded, none.
-    func commits(for pr: PullRequest) -> [Commit]? { commitsByPR[pr.id] }
-    func isLoadingCommits(_ pr: PullRequest) -> Bool { loadingCommits.contains(pr.id) }
-
-    /// Fetch a PR's commit timeline (with per-commit CI) once and cache it.
+    func commits(for pr: PullRequest) -> [Commit]? { commitsCache.value(for: pr) }
+    func isLoadingCommits(_ pr: PullRequest) -> Bool { commitsCache.isLoading(pr) }
     func loadCommits(for pr: PullRequest) {
-        guard commitsByPR[pr.id] == nil, !loadingCommits.contains(pr.id) else { return }
-        loadingCommits.insert(pr.id)
-        let id = pr.id, number = pr.number, (owner, repo) = Self.split(pr.repoFullName), myEpoch = epoch
-        Task { [weak self] in
-            guard let self else { return }
-            let timeline = (try? await self.client.commits(owner: owner, repo: repo, number: number)) ?? []
-            guard myEpoch == self.epoch else { return }   // account switched mid-flight: discard
-            self.loadingCommits.remove(id)
-            self.commitsByPR[id] = timeline
-            self.onSubmenuReload?(id)
-        }
-    }
-
-    private static func split(_ fullName: String) -> (owner: String, repo: String) {
-        let parts = fullName.split(separator: "/", maxSplits: 1).map(String.init)
-        return (parts.first ?? "", parts.count > 1 ? parts[1] : "")
+        commitsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
     }
 
     func setTheme(_ t: Theme) {
         theme = t
+        palette = t.palette
         UserDefaults.standard.set(t.rawValue, forKey: "theme")
         Theme.apply(t)
         onChange?()   // re-render with the new palette
@@ -335,7 +317,6 @@ final class AppModel {
         epoch += 1
         viewer = nil
         firstPass = true
-        commentsByPR.removeAll(); loadingComments.removeAll()   // comments are account-scoped
-        commitsByPR.removeAll(); loadingCommits.removeAll()
+        commentsCache.reset(); commitsCache.reset()   // account-scoped
     }
 }

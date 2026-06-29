@@ -105,9 +105,18 @@ final class StatusController: NSObject {
         return i
     }
 
-    /// Catppuccin palette for the active theme, or nil for System/Light/Dark
-    /// (which use stock label/system colors).
-    private var palette: Palette? { model.theme.palette }
+    /// Catppuccin palette for the active theme (cached on the model), or nil for
+    /// System/Light/Dark (which use stock label/system colors).
+    private var palette: Palette? { model.palette }
+
+    /// Tint a menu item's title for Catppuccin themes. No-op for System/Light/Dark
+    /// so AppKit keeps its automatic title inversion on the selection highlight.
+    private func tint(_ item: NSMenuItem, _ color: (Palette) -> NSColor) {
+        if let p = palette {
+            item.attributedTitle = NSAttributedString(string: item.title,
+                                                      attributes: [.foregroundColor: color(p)])
+        }
+    }
 
     private func section(_ menu: NSMenu, _ name: String, _ prs: [PullRequest]) {
         let header = NSMenuItem(title: "\(name) (\(prs.count))", action: nil, keyEquivalent: "")
@@ -125,11 +134,11 @@ final class StatusController: NSObject {
         for pr in prs.prefix(sectionCap) {
             let i = NSMenuItem(title: "\(pr.repoFullName)#\(pr.number)  \(pr.title)",
                                action: nil, keyEquivalent: "")   // submenu = expand; "Open" lives inside it
-            if let p = palette { i.attributedTitle = NSAttributedString(string: i.title, attributes: [.foregroundColor: p.text]) }
+            tint(i) { $0.text }
             i.image = ciImage(pr.ciState)   // semantic SF Symbol, not emoji (F2)
             let sub = PRSubmenu(pr: pr)
-            sub.delegate = self                  // menuWillOpen -> lazy-load comments
-            populate(sub)
+            sub.delegate = self                  // menuWillOpen -> lazy-load + populate
+            sub.addItem(disabledRow("PR details…"))   // placeholder so the arrow shows; replaced on open
             submenus[pr.id, default: []].append(sub)
             i.submenu = sub
             menu.addItem(i)
@@ -229,7 +238,7 @@ final class StatusController: NSObject {
     /// Build a sticky toggle menu item: clicking it runs `action`, refreshes all
     /// live toggles' checkmarks in place, and leaves the menu open.
     private func toggle(_ title: String, isOn: @escaping () -> Bool, action: @escaping () -> Void) -> NSMenuItem {
-        let view = MenuToggleView(title: title, isOn: isOn) { [weak self] in
+        let view = MenuToggleView(title: title, tint: palette?.text, isOn: isOn) { [weak self] in
             action()
             self?.toggleViews.forEach { $0.refresh() }   // sibling checkmarks update without rebuild
         }
@@ -279,31 +288,27 @@ final class StatusController: NSObject {
     }
 
     private func commitItem(_ c: Commit) -> NSMenuItem {
-        let title = "\(c.message.prefix(56))  ·  \(c.shortSHA)  ·  \(c.author) \(Self.age(c.date))"
-        let hasURL = c.htmlURL != nil
-        let i = NSMenuItem(title: title, action: hasURL ? #selector(openPR(_:)) : nil, keyEquivalent: "")
-        i.target = self
-        i.representedObject = c.htmlURL
-        if let p = palette { i.attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: p.text]) }
-        i.image = ciImage(c.ciState)   // per-commit check-runs
-        return i
+        let title = "\(c.message.prefix(56))  ·  \(c.shortSHA)  ·  \(c.author) \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
+        return linkRow(title: title, image: ciImage(c.ciState), url: c.htmlURL)   // per-commit check-runs
     }
 
-    private static func age(_ d: Date) -> String {
-        let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated
-        return f.localizedString(for: d, relativeTo: Date())
-    }
+    private static let age: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated; return f
+    }()
 
     private func commentItem(_ c: ReviewComment) -> NSMenuItem {
         let snippet = c.body.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         let loc = c.location.map { " (\($0))" } ?? ""
-        let title = "\(c.author): \(snippet.prefix(64))\(loc)"
-        let hasURL = c.htmlURL != nil
-        let i = NSMenuItem(title: title, action: hasURL ? #selector(openPR(_:)) : nil, keyEquivalent: "")
+        return linkRow(title: "\(c.author): \(snippet.prefix(64))\(loc)", image: verdictImage(c.verdict), url: c.htmlURL)
+    }
+
+    /// A clickable, optionally-themed menu row that opens `url` in the browser.
+    private func linkRow(title: String, image: NSImage?, url: URL?) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: url != nil ? #selector(openPR(_:)) : nil, keyEquivalent: "")
         i.target = self
-        i.representedObject = c.htmlURL
-        if let p = palette { i.attributedTitle = NSAttributedString(string: title, attributes: [.foregroundColor: p.text]) }
-        i.image = verdictImage(c.verdict)
+        i.representedObject = url
+        tint(i) { $0.text }
+        i.image = image
         return i
     }
 
@@ -379,9 +384,8 @@ final class StatusController: NSObject {
         img.isTemplate = false
         return img
     }
-    private static func time(_ d: Date) -> String {
-        let f = DateFormatter(); f.timeStyle = .short; return f.string(from: d)
-    }
+    static let shortTime: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; return f }()
+    private static func time(_ d: Date) -> String { shortTime.string(from: d) }
 }
 
 /// An NSMenu that remembers which PR it belongs to, so the delegate can lazy-load

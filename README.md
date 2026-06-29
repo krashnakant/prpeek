@@ -77,7 +77,17 @@ Key design decisions (full record in `CONTRIBUTING.md` + the design doc):
 
 **From a release:** download `PRPeek.dmg` from
 [Releases](https://github.com/krashnakant/prpeek/releases), drag to Applications.
-The DMG is ad-hoc signed (not yet notarized) — first launch: **right-click ▸ Open**.
+The DMG is ad-hoc signed (not notarized) — Gatekeeper blocks first launch.
+Two ways past it:
+
+- **Right-click ▸ Open** on `PRPeek.app`, then **Open** in the dialog (once).
+- Or strip the quarantine flag from a terminal:
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/PRPeek.app
+  ```
+
+Notarization (Developer ID, friction-free install) needs a paid Apple Developer
+account — skipped until download volume justifies it.
 
 **From source:**
 ```bash

@@ -55,11 +55,28 @@ public struct KeychainTokenStore: TokenStore {
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         let status = SecItemCopyMatching(q as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = item as? Data else {
-            throw KeychainError.status(status)
+        switch Self.classifyRead(status) {
+        case .ok:
+            guard let data = item as? Data else { throw KeychainError.status(status) }
+            return String(data: data, encoding: .utf8)
+        case .missing: return nil          // no token yet -> caller signs out
+        case .locked: throw KeychainError.locked   // locked -> caller retries, does NOT sign out
+        case .failure: throw KeychainError.status(status)
         }
-        return String(data: data, encoding: .utf8)
+    }
+
+    enum ReadOutcome: Equatable { case ok, missing, locked, failure }
+
+    /// Split a Keychain read status into "no token" vs "locked, retry" vs real
+    /// failure. The distinction matters: a locked Keychain must not be mistaken
+    /// for a signed-out user (which would wipe the perceived session).
+    static func classifyRead(_ status: OSStatus) -> ReadOutcome {
+        switch status {
+        case errSecSuccess: return .ok
+        case errSecItemNotFound: return .missing
+        case errSecInteractionNotAllowed, errSecAuthFailed: return .locked
+        default: return .failure
+        }
     }
 
     public func save(_ token: String) throws {
@@ -83,7 +100,7 @@ public struct KeychainTokenStore: TokenStore {
         }
     }
 
-    public enum KeychainError: Error, Equatable { case status(OSStatus) }
+    public enum KeychainError: Error, Equatable { case status(OSStatus), locked }
 }
 
 // MARK: - OAuth device flow

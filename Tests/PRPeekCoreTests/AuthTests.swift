@@ -102,4 +102,13 @@ final class AuthTests: XCTestCase {
         try store.delete()
         XCTAssertNil(try store.read())
     }
+
+    func test_keychain_classifyRead_distinguishes_locked_from_missing() {
+        typealias S = KeychainTokenStore
+        XCTAssertEqual(S.classifyRead(errSecSuccess), .ok)
+        XCTAssertEqual(S.classifyRead(errSecItemNotFound), .missing, "no token -> sign out")
+        XCTAssertEqual(S.classifyRead(errSecInteractionNotAllowed), .locked, "locked -> retry, not sign out")
+        XCTAssertEqual(S.classifyRead(errSecAuthFailed), .locked)
+        XCTAssertEqual(S.classifyRead(errSecParam), .failure)
+    }
 }

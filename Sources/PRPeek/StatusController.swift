@@ -109,21 +109,29 @@ final class StatusController: NSObject {
     /// System/Light/Dark (which use stock label/system colors).
     private var palette: Palette? { model.palette }
 
-    /// Tint a menu item's title for Catppuccin themes. No-op for System/Light/Dark
-    /// so AppKit keeps its automatic title inversion on the selection highlight.
+    private func styleSectionHeader(_ h: NSMenuItem) {
+        var attrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)]
+        if let p = palette { attrs[.foregroundColor] = p.subtext }
+        h.attributedTitle = NSAttributedString(string: h.title, attributes: attrs)
+    }
+
+    /// Tint a menu item's title for Catppuccin themes. For System/Light/Dark it
+    /// clears the attributed title so AppKit keeps its automatic color + selection
+    /// highlight inversion. Setting it both ways makes it safe to call on a live
+    /// theme switch (Catppuccin -> System must drop the stale tint).
     private func tint(_ item: NSMenuItem, _ color: (Palette) -> NSColor) {
         if let p = palette {
             item.attributedTitle = NSAttributedString(string: item.title,
                                                       attributes: [.foregroundColor: color(p)])
+        } else {
+            item.attributedTitle = nil
         }
     }
 
     private func section(_ menu: NSMenu, _ name: String, _ prs: [PullRequest]) {
         let header = NSMenuItem(title: "\(name) (\(prs.count))", action: nil, keyEquivalent: "")
-        var attrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize)]
-        if let p = palette { attrs[.foregroundColor] = p.subtext }
-        header.attributedTitle = NSAttributedString(string: "\(name) (\(prs.count))", attributes: attrs)
         header.isEnabled = false
+        styleSectionHeader(header)
         menu.addItem(header)
 
         if prs.isEmpty {
@@ -224,9 +232,9 @@ final class StatusController: NSObject {
             sub.addItem(toggle(t.label, isOn: { [weak self] in self?.model.theme == t }) { [weak self] in
                 guard let self else { return }
                 self.model.setTheme(t)
-                // Apply the new appearance to the OPEN menu now — full effect for
-                // System/Light/Dark; Catppuccin base flips live, text tint on reopen
-                // (per-item recolor needs a rebuild, which would close the menu).
+                // Live appearance (light/dark base) on the open menu. Catppuccin's
+                // per-item text/CI recolor applies on the next open: mutating a live
+                // vibrant NSMenu's items in place hangs AppKit and ghosts the text.
                 self.item.menu?.appearance = t.nsAppearance
                 sub.appearance = t.nsAppearance
             })

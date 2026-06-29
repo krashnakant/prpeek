@@ -12,18 +12,36 @@ public actor GitHubClient {
     /// url string -> (etag, last 200 body). Backs conditional requests; 304 ->
     /// return cached body without burning the primary rate limit.
     private var etagCache: [String: (etag: String, data: Data)]
+    private var etagOrder: [String] = []          // FIFO for bounded eviction
+    private let etagCap = 600                      // cap: check-runs keyed by head SHA grow forever otherwise
 
     public init(transport: Transport, token: String? = nil,
                 etagCache: [String: (etag: String, data: Data)] = [:]) {
         self.transport = transport
         self.token = token
         self.etagCache = etagCache
+        self.etagOrder = Array(etagCache.keys)
     }
 
-    public func setToken(_ token: String?) { self.token = token }
+    /// Changing the token (sign out / switch account) MUST flush the ETag cache:
+    /// the search URL is byte-identical across accounts, so a stale `If-None-Match`
+    /// could 304 the previous account's body back. Account-scoped correctness.
+    public func setToken(_ token: String?) {
+        if token != self.token { etagCache.removeAll(); etagOrder.removeAll() }
+        self.token = token
+    }
 
-    /// Snapshot of the ETag cache so the JSON store (T2) can persist it.
-    public func etagSnapshot() -> [String: (etag: String, data: Data)] { etagCache }
+    /// Bounded insert: cap memory over a weeks-long session.
+    private func storeETag(_ key: String, etag: String, data: Data) {
+        if etagCache[key] == nil {
+            etagOrder.append(key)
+            if etagOrder.count > etagCap {
+                let oldest = etagOrder.removeFirst()
+                etagCache.removeValue(forKey: oldest)
+            }
+        }
+        etagCache[key] = (etag, data)
+    }
 
     // MARK: - Public typed reads
 
@@ -83,7 +101,7 @@ public actor GitHubClient {
         switch http.statusCode {
         case 200:
             if let etag = http.value(forHTTPHeaderField: "ETag") {
-                etagCache[url.absoluteString] = (etag, data)
+                storeETag(url.absoluteString, etag: etag, data: data)
             }
             return (data, http)
         case 304:

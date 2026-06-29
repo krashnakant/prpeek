@@ -155,8 +155,11 @@ public struct DeviceFlowAuth: Sendable {
         var intervalSecs = max(1, code.interval)
         let maxAttempts = max(1, code.expiresIn / intervalSecs)
         for _ in 0..<maxAttempts {
-            try await sleep(UInt64(intervalSecs) * 1_000_000_000)
-            switch try await pollOnce(deviceCode: code.deviceCode) {
+            try await sleep(UInt64(intervalSecs) * 1_000_000_000)  // CancellationError propagates (sign-out aborts)
+            let result: DevicePollResult
+            do { result = try await pollOnce(deviceCode: code.deviceCode) }
+            catch { continue }   // transient 5xx / network / unknown body -> retry, don't kill a valid sign-in
+            switch result {
             case .token(let t): return t
             case .pending: continue
             case .slowDown: intervalSecs += 5

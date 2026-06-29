@@ -35,9 +35,14 @@ final class StatusController: NSObject {
             menu.addItem(action("Sign in with GitHub…", #selector(signIn)))
             menu.addItem(action("Paste token…", #selector(pasteToken)))
         } else {
+            // F3: "All" was a superset of the first two -> every PR shown up to 3×.
+            // Third section is the remainder so each PR appears once.
+            let needIDs = Set(model.needsMe.map(\.id))
+            let mineIDs = Set(model.mine.map(\.id))
+            let others = model.all.filter { !needIDs.contains($0.id) && !mineIDs.contains($0.id) }
             section(menu, "Needs me", model.needsMe)
             section(menu, "Mine", model.mine)
-            section(menu, "All", model.all)
+            section(menu, "Others", others)
             menu.addItem(.separator())
             menu.addItem(action("Refresh now", #selector(refresh)))
             menu.addItem(action("Sign out", #selector(signOut)))
@@ -79,10 +84,11 @@ final class StatusController: NSObject {
             menu.addItem(empty)
         }
         for pr in prs.prefix(sectionCap) {
-            let i = NSMenuItem(title: "\(Self.ciMark(pr.ciState)) \(pr.repoFullName)#\(pr.number)  \(pr.title)",
+            let i = NSMenuItem(title: "\(pr.repoFullName)#\(pr.number)  \(pr.title)",
                                action: #selector(openPR(_:)), keyEquivalent: "")
             i.target = self
             i.representedObject = pr.htmlURL
+            i.image = Self.ciImage(pr.ciState)   // semantic SF Symbol, not emoji (F2)
             menu.addItem(i)
         }
         if prs.count > sectionCap {
@@ -110,10 +116,14 @@ final class StatusController: NSObject {
         let alert = NSAlert()
         alert.messageText = "Paste a GitHub token"
         alert.informativeText = "Fine-grained or classic PAT with repo + read:org access."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        // F4: a token is a secret — secure field (masked, no echo), focused so
+        // the user can paste immediately.
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = "ghp_… or github_pat_…"
         alert.accessoryView = field
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
         if alert.runModal() == .alertFirstButtonReturn { model.pastePAT(field.stringValue) }
     }
 
@@ -123,8 +133,20 @@ final class StatusController: NSObject {
         i.target = self
         return i
     }
-    private static func ciMark(_ s: CIState) -> String {
-        switch s { case .passing: return "✅"; case .failing: return "❌"; case .pending: return "🟡"; case .none: return "▫️" }
+    /// CI status as a color SF Symbol (HIG-native, not emoji). Shape + color so
+    /// it's not color-only encoding.
+    private static func ciImage(_ s: CIState) -> NSImage? {
+        let spec: (String, NSColor)
+        switch s {
+        case .passing: spec = ("checkmark.circle.fill", .systemGreen)
+        case .failing: spec = ("xmark.octagon.fill", .systemRed)
+        case .pending: spec = ("clock.fill", .systemYellow)
+        case .none:    spec = ("minus.circle", .tertiaryLabelColor)
+        }
+        guard let base = NSImage(systemSymbolName: spec.0, accessibilityDescription: nil) else { return nil }
+        let img = base.withSymbolConfiguration(.init(paletteColors: [spec.1])) ?? base
+        img.isTemplate = false   // preserve the semantic color in the menu
+        return img
     }
     private static func time(_ d: Date) -> String {
         let f = DateFormatter(); f.timeStyle = .short; return f.string(from: d)

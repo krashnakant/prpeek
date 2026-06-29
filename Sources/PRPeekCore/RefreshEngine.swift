@@ -28,7 +28,17 @@ public struct RefreshEngine: Sendable {
     public func refresh(filters: [String], viewer: ViewerContext) async throws -> [PullRequest] {
         let base = try await search.openPRsInvolvingMe(filters: filters)
         return try await mapConcurrent(base, limit: concurrencyLimit) { pr in
-            try await enrich(pr, viewer: viewer)
+            do {
+                return try await enrich(pr, viewer: viewer)
+            } catch GitHubError.rateLimited(let until) {
+                throw GitHubError.rateLimited(retryAfter: until)   // pause the scheduler
+            } catch GitHubError.unauthorized {
+                throw GitHubError.unauthorized                     // trigger re-auth
+            } catch {
+                // One forbidden/deleted/flaky PR must not freeze the whole menu.
+                // Keep its search-level data un-enriched (CI unknown, not waiting).
+                return pr
+            }
         }
     }
 

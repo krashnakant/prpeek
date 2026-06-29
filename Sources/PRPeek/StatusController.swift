@@ -79,10 +79,11 @@ final class StatusController: NSObject {
             menu.addItem(empty)
         }
         for pr in prs.prefix(sectionCap) {
-            let i = NSMenuItem(title: "\(Self.ciMark(pr.ciState)) \(pr.repoFullName)#\(pr.number)  \(pr.title)",
+            let i = NSMenuItem(title: "\(pr.repoFullName)#\(pr.number)  \(pr.title)",
                                action: #selector(openPR(_:)), keyEquivalent: "")
             i.target = self
             i.representedObject = pr.htmlURL
+            i.image = Self.ciImage(pr.ciState)   // semantic SF Symbol, not emoji (F2)
             menu.addItem(i)
         }
         if prs.count > sectionCap {
@@ -123,8 +124,20 @@ final class StatusController: NSObject {
         i.target = self
         return i
     }
-    private static func ciMark(_ s: CIState) -> String {
-        switch s { case .passing: return "✅"; case .failing: return "❌"; case .pending: return "🟡"; case .none: return "▫️" }
+    /// CI status as a color SF Symbol (HIG-native, not emoji). Shape + color so
+    /// it's not color-only encoding.
+    private static func ciImage(_ s: CIState) -> NSImage? {
+        let spec: (String, NSColor)
+        switch s {
+        case .passing: spec = ("checkmark.circle.fill", .systemGreen)
+        case .failing: spec = ("xmark.octagon.fill", .systemRed)
+        case .pending: spec = ("clock.fill", .systemYellow)
+        case .none:    spec = ("minus.circle", .tertiaryLabelColor)
+        }
+        guard let base = NSImage(systemSymbolName: spec.0, accessibilityDescription: nil) else { return nil }
+        let img = base.withSymbolConfiguration(.init(paletteColors: [spec.1])) ?? base
+        img.isTemplate = false   // preserve the semantic color in the menu
+        return img
     }
     private static func time(_ d: Date) -> String {
         let f = DateFormatter(); f.timeStyle = .short; return f.string(from: d)

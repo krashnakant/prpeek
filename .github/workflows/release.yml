@@ -1,0 +1,37 @@
+name: Release
+
+# Tag a release: git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub Release + upload the DMG
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable   # needs macOS 26 SDK; pin Xcode_26.x if the image lags
+
+      - name: Build DMG
+        run: bash Scripts/make-dmg.sh
+
+      # --- Notarization (optional follow-up; needs an Apple Developer ID) ---
+      # Add repo secrets DEVELOPER_ID_CERT (base64 .p12), CERT_PASSWORD,
+      # APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD, then enable:
+      # - name: Sign & notarize
+      #   run: |
+      #     codesign --force --options runtime --sign "$DEVELOPER_ID" PRPeek.app
+      #     xcrun notarytool submit PRPeek.dmg --apple-id "$APPLE_ID" \
+      #       --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+      #     xcrun stapler staple PRPeek.dmg
+
+      - name: Attach DMG to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PRPeek.dmg
+          generate_release_notes: true

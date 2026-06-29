@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          # PRPeek targets macOS 26 (Tahoe) + Swift 6.2. Needs a runner image
+          # whose Xcode ships the macOS 26 SDK. 'latest-stable' picks the newest
+          # available; if the hosted image lags, pin a specific Xcode_26.x here.
+          xcode-version: latest-stable
+      - name: swift test
+        run: swift test

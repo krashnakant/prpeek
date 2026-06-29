@@ -110,6 +110,56 @@ final class GitHubClientTests: XCTestCase {
         let all: [Probe] = try await client.getCollection(path: "/things")
         XCTAssertEqual(all.map(\.login), ["a", "b", "c"], "must concat all pages")
     }
+
+    /// A conditional refresh of a paginated collection: every page 304s. GitHub
+    /// re-sends the `Link` header on a 304, so the loop must read it from the
+    /// LIVE 304 response (not the cached page) and still reach page 2 from cache.
+    func test_304_refresh_follows_link_from_live_response() async throws {
+        let page2 = "https://api.github.com/things?page=2"
+        let client = makeClient()
+        // Seed cache: page1 (Link -> page2) + page2.
+        URLProtocolStub.handler = { req in
+            if req.url!.absoluteString.contains("page=2") {
+                return (httpResponse(url: req.url!, status: 200, headers: ["ETag": "e2"]),
+                        #"[{"login":"c"}]"#.data(using: .utf8)!)
+            }
+            return (httpResponse(url: req.url!, status: 200,
+                                 headers: ["ETag": "e1", "Link": "<\(page2)>; rel=\"next\""]),
+                    #"[{"login":"a"},{"login":"b"}]"#.data(using: .utf8)!)
+        }
+        _ = try await client.getCollection(Probe.self, path: "/things")
+
+        // Refresh: both pages 304; page1's 304 still carries the Link header.
+        URLProtocolStub.handler = { req in
+            let isPage2 = req.url!.absoluteString.contains("page=2")
+            let headers = isPage2 ? [:] : ["Link": "<\(page2)>; rel=\"next\""]
+            return (httpResponse(url: req.url!, status: 304, headers: headers), nil)
+        }
+        let all: [Probe] = try await client.getCollection(path: "/things")
+        XCTAssertEqual(all.map(\.login), ["a", "b", "c"], "304 refresh must follow Link from the live response")
+    }
+
+    /// Degraded case: a 304 with no `Link` header stops pagination after the
+    /// first page (returns its cached body). Guarantee: terminates cleanly —
+    /// no crash, no infinite loop, no stale later pages.
+    func test_304_without_link_terminates_with_cached_first_page() async throws {
+        let page2 = "https://api.github.com/things?page=2"
+        let client = makeClient()
+        URLProtocolStub.handler = { req in
+            if req.url!.absoluteString.contains("page=2") {
+                return (httpResponse(url: req.url!, status: 200, headers: ["ETag": "e2"]),
+                        #"[{"login":"c"}]"#.data(using: .utf8)!)
+            }
+            return (httpResponse(url: req.url!, status: 200,
+                                 headers: ["ETag": "e1", "Link": "<\(page2)>; rel=\"next\""]),
+                    #"[{"login":"a"},{"login":"b"}]"#.data(using: .utf8)!)
+        }
+        _ = try await client.getCollection(Probe.self, path: "/things")
+
+        URLProtocolStub.handler = { req in (httpResponse(url: req.url!, status: 304), nil) }
+        let all: [Probe] = try await client.getCollection(path: "/things")
+        XCTAssertEqual(all.map(\.login), ["a", "b"], "no Link on 304 -> stop after page 1")
+    }
 }
 
 /// Tiny async throws helper (no framework).

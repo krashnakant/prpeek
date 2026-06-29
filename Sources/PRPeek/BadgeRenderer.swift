@@ -3,11 +3,12 @@ import AppKit
 /// Renders the menubar icon. Color path uses isTemplate=false (T7 spike proved
 /// color survives only that way). Counts are baked into a pre-rendered NSImage.
 enum BadgeRenderer {
-    static func icon(needsMe: Int, total: Int, signedOut: Bool, offline: Bool) -> NSImage {
+    static func icon(needsMe: Int, total: Int, signedOut: Bool, offline: Bool,
+                     accent: NSColor = .systemRed) -> NSImage {
         if signedOut { return symbol("person.crop.circle.badge.questionmark", template: true) }
         if offline { return symbol("wifi.slash", template: true) }
         if needsMe > 0 {
-            return pill(text: "\(needsMe)", fill: .systemRed)   // attention: color survives
+            return pill(text: "\(needsMe)", fill: accent)   // attention: color survives (theme accent)
         }
         if total > 0 {
             return numberTemplate("\(total)")  // calm: monochrome digits (readable, HIG menubar color)

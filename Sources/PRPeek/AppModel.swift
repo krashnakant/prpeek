@@ -34,8 +34,19 @@ final class AppModel {
 
     private(set) var state: PRPeekState
     private(set) var status: AppStatus = .signedOut
+    private(set) var theme: Theme = .system
+    /// Parsed once per theme change, not re-derived on every menu render (the
+    /// Catppuccin palette parses 6 hex strings).
+    private(set) var palette: Palette?
     private var viewer: ViewerContext?
     private var previousPRs: [PullRequest] = []
+    private var seenRepos: Set<String> = []   // every repo seen this session (for the filter picker)
+    // Cache token presence in memory so the 3-min refresh loop never re-reads the
+    // Keychain — each read on an ad-hoc-signed build re-prompts for access.
+    // `tokenKnown` stays false only while a launch read failed (Keychain locked),
+    // so refreshNow retries until it succeeds, then caches.
+    private var tokenKnown = false
+    private var hasToken = false
     private var refreshing = false
     private var loopTask: Task<Void, Never>?
     private var signInTask: Task<Void, Never>?
@@ -45,10 +56,21 @@ final class AppModel {
     /// First refresh seeds `previousPRs` WITHOUT notifying — otherwise a fresh
     /// launch would fire a notification for every existing waiting PR.
     private var firstPass = true
-    private let interval: UInt64 = 180 * 1_000_000_000   // 3 min, well under search 30/min
+    /// Poll cadence in seconds, user-configurable (15m/1h/3h/1d). Default 15m —
+    /// all options stay well under the search API's 30/min.
+    private(set) var refreshIntervalSecs: Int = 900
 
     /// StatusController subscribes here to rebuild the menu + badge.
     var onChange: (@MainActor () -> Void)?
+    /// Fired with a PR id when its review comments or commits finish loading, so
+    /// the controller can repopulate just that submenu (no full menu rebuild).
+    var onSubmenuReload: (@MainActor (String) -> Void)?
+
+    // Review comments + commits are fetched on demand (submenu open), never in the
+    // loop. Caches capture the GitHubClient actor (not self) so the fetch closures
+    // are @Sendable — initialized in init once `client` exists.
+    private let commentsCache: PerPRLazyCache<[ReviewComment]>
+    private let commitsCache: PerPRLazyCache<[Commit]>
 
     // Views
     var needsMe: [PullRequest] { state.pullRequests.filter(\.waitingOnMe) }
@@ -56,15 +78,56 @@ final class AppModel {
     var all: [PullRequest] { state.pullRequests }
     var lastUpdated: Date? { state.lastUpdated }
 
+    // Repo filter (UI: "Filter repos" submenu). `state.filters` empty == all repos.
+    var repoFilters: [String] { state.filters }
+    /// Repos to offer in the picker: every repo seen this session, plus current
+    /// PRs and active filters. Accumulator means a repo you uncheck (and thus
+    /// filter out of results) still shows so you can toggle it back on.
+    /// ponytail: in-memory, reseeded from cached PRs on launch — a repo unchecked
+    /// before quit won't list until "All repos" refetches it. Persist seenRepos
+    /// if that matters.
+    var knownRepos: [String] {
+        seenRepos.union(state.pullRequests.map(\.repoFullName)).union(state.filters).sorted()
+    }
+    /// Selecting every known repo == no filter. Normalize so the badge query
+    /// drops the `repo:` qualifiers (cheaper, and "All" reads clean).
+    func setRepoFilters(_ repos: [String]) {
+        let normalized = Set(repos) == Set(knownRepos) ? [] : repos.sorted()
+        guard normalized != state.filters else { return }
+        state.filters = normalized
+        saveState()
+        kickRefresh()
+    }
+
     init() {
         self.tokenStore = KeychainTokenStore()
         self.store = JSONStore(url: JSONStore.defaultURL())
         self.state = store.load()                 // instant cached PRs on launch
         self.previousPRs = state.pullRequests
-        let token = try? tokenStore.read()
+        self.seenRepos = Set(state.pullRequests.map(\.repoFullName))
+        self.theme = UserDefaults.standard.string(forKey: "theme").flatMap(Theme.init) ?? .system
+        self.palette = theme.palette
+        Theme.apply(theme)
+        if let secs = UserDefaults.standard.object(forKey: "refreshIntervalSecs") as? Int, secs > 0 {
+            self.refreshIntervalSecs = secs
+        }
+        let token: String?
+        let readOK: Bool
+        do { token = try tokenStore.read(); readOK = true }
+        catch { token = nil; readOK = false }   // Keychain locked at launch
+        self.tokenKnown = readOK
+        self.hasToken = readOK && token != nil
         self.client = GitHubClient(transport: URLSessionTransport(), token: token)
         self.engine = RefreshEngine(client: client)
-        self.status = (token == nil) ? .signedOut : .loading
+        let client = self.client   // capture the actor, not self, for the @Sendable fetch closures
+        self.commentsCache = PerPRLazyCache { o, r, n in
+            (try? await client.reviewThread(owner: o, repo: r, number: n)) ?? []
+        }
+        self.commitsCache = PerPRLazyCache { o, r, n in
+            (try? await client.commits(owner: o, repo: r, number: n)) ?? []
+        }
+        // Locked (readOK false) -> .loading so the loop retries; don't claim signed-out.
+        self.status = (readOK && token == nil) ? .signedOut : .loading
     }
 
     func start() {
@@ -96,13 +159,20 @@ final class AppModel {
             let secs = max(until.timeIntervalSinceNow, 5)
             return UInt64(secs * 1_000_000_000)
         }
-        return interval
+        return UInt64(refreshIntervalSecs) * 1_000_000_000
     }
 
     func kickRefresh() { Task { await refreshNow() } }
 
     func refreshNow() async {
-        guard (try? tokenStore.read()) != nil else { setStatus(.signedOut); return }
+        if !tokenKnown {   // launch read was blocked (Keychain locked) — retry, don't re-read once known
+            do {
+                let t = try tokenStore.read()
+                hasToken = t != nil; tokenKnown = true
+                if let t { await client.setToken(t) }   // deliver it: client was built token-less on a locked launch
+            } catch { setStatus(.error("Keychain locked — unlock to refresh")); return }
+        }
+        guard hasToken else { setStatus(.signedOut); return }
         guard lifecycle.networkAvailable else { setStatus(.offline); return }
         guard !refreshing else { return }     // single-flight: coalesce overlapping ticks
         refreshing = true
@@ -128,6 +198,7 @@ final class AppModel {
             firstPass = false
             previousPRs = prs
             state.pullRequests = prs
+            seenRepos.formUnion(prs.map(\.repoFullName))   // remember repos even after they're filtered out
             state.lastUpdated = Date()
             saveState()
             setStatus(.loaded)
@@ -142,6 +213,37 @@ final class AppModel {
         }
     }
 
+    // MARK: - Review comments + commits (lazy, per-PR)
+    // nil from value(for:) = not loaded yet; non-nil = loaded (may be empty).
+
+    func comments(for pr: PullRequest) -> [ReviewComment]? { commentsCache.value(for: pr) }
+    func isLoadingComments(_ pr: PullRequest) -> Bool { commentsCache.isLoading(pr) }
+    func loadComments(for pr: PullRequest) {
+        commentsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
+    }
+
+    func commits(for pr: PullRequest) -> [Commit]? { commitsCache.value(for: pr) }
+    func isLoadingCommits(_ pr: PullRequest) -> Bool { commitsCache.isLoading(pr) }
+    func loadCommits(for pr: PullRequest) {
+        commitsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
+    }
+
+    func setTheme(_ t: Theme) {
+        theme = t
+        palette = t.palette
+        UserDefaults.standard.set(t.rawValue, forKey: "theme")
+        Theme.apply(t)
+        onChange?()   // re-render with the new palette
+    }
+
+    func setRefreshInterval(_ secs: Int) {
+        guard secs > 0, secs != refreshIntervalSecs else { return }
+        refreshIntervalSecs = secs
+        UserDefaults.standard.set(secs, forKey: "refreshIntervalSecs")
+        startLoop()   // restart so the new cadence takes effect immediately
+        onChange?()
+    }
+
     private func setStatus(_ s: AppStatus) { status = s; onChange?() }
     private func saveState() {
         do { try store.save(state) } catch { /* disk-full etc: cache is best-effort, keep running */ }
@@ -154,6 +256,7 @@ final class AppModel {
         guard !trimmed.isEmpty else { return }
         do { try tokenStore.save(trimmed) }
         catch { setStatus(.error("Couldn't save token to Keychain.")); return }
+        tokenKnown = true; hasToken = true
         beginNewSession()
         Task { await client.setToken(trimmed); startLoop() }
     }
@@ -179,6 +282,7 @@ final class AppModel {
                 })
                 do { try self.tokenStore.save(token) }
                 catch { self.setStatus(.error("Couldn't save token to Keychain.")); return }
+                self.tokenKnown = true; self.hasToken = true
                 self.beginNewSession()
                 await self.client.setToken(token)
                 self.startLoop()
@@ -197,6 +301,7 @@ final class AppModel {
     func signOut() {
         signInTask?.cancel(); signInTask = nil
         beginNewSession()
+        tokenKnown = true; hasToken = false
         do { try tokenStore.delete() } catch { /* best effort; in-memory token cleared below */ }
         previousPRs = []
         state.pullRequests = []
@@ -212,5 +317,6 @@ final class AppModel {
         epoch += 1
         viewer = nil
         firstPass = true
+        commentsCache.reset(); commitsCache.reset()   // account-scoped
     }
 }

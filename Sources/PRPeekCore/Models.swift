@@ -29,6 +29,13 @@ public struct PullRequest: Codable, Sendable, Identifiable, Equatable {
         self.author = author; self.headSHA = headSHA; self.ciState = ciState
         self.waitingOnMe = waitingOnMe; self.updatedAt = updatedAt
     }
+
+    /// "owner/name" -> (owner, name). The one owner of this split (was copied in
+    /// RefreshEngine and AppModel).
+    public var ownerRepo: (owner: String, repo: String) {
+        let parts = repoFullName.split(separator: "/", maxSplits: 1).map(String.init)
+        return (parts.first ?? "", parts.count > 1 ? parts[1] : "")
+    }
 }
 
 /// Everything persisted to disk. `schemaVersion` gates migration/recovery.

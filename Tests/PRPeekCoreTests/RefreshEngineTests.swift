@@ -84,6 +84,30 @@ final class RefreshEngineTests: XCTestCase {
         XCTAssertGreaterThan(probe.maxActive, 1, "should actually run in parallel")
     }
 
+    func test_one_failing_pr_does_not_abort_the_pass() async throws {
+        let searchBody = #"""
+        {"items":[
+          {"number":1,"title":"ok","html_url":"https://github.com/o/r/pull/1","node_id":"N1","draft":false,"user":{"login":"me"},"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-06-01T10:00:00Z"},
+          {"number":2,"title":"gone","html_url":"https://github.com/o/r/pull/2","node_id":"N2","draft":false,"user":{"login":"me"},"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-06-01T10:00:00Z"}
+        ]}
+        """#
+        let transport = RouteTransport { req in
+            let u = req.url!.absoluteString
+            if u.contains("/user/teams") { return (200, d("[]"), [:]) }
+            if u.contains("/user") { return (200, d(#"{"login":"me","node_id":"U1"}"#), [:]) }
+            if u.contains("/search/issues") { return (200, d(searchBody), [:]) }
+            if u.contains("/pulls/1") { return (200, d(#"{"draft":false,"head":{"sha":"s1"},"requested_reviewers":[],"requested_teams":[]}"#), [:]) }
+            if u.contains("/pulls/2") { return (404, Data(), [:]) }   // PR deleted/forbidden between search and detail
+            if u.contains("/commits/s1/check-runs") { return (200, d(#"{"check_runs":[{"status":"completed","conclusion":"success"}]}"#), [:]) }
+            return (404, Data(), [:])
+        }
+        let engine = RefreshEngine(client: GitHubClient(transport: transport, token: "t"))
+        let prs = try await engine.refresh(filters: [], viewer: ViewerContext(login: "me"))
+        XCTAssertEqual(prs.count, 2, "a single failing PR must not drop the whole pass")
+        XCTAssertEqual(prs.first { $0.id == "N1" }?.ciState, .passing)
+        XCTAssertEqual(prs.first { $0.id == "N2" }?.ciState, CIState.none, "failed enrich -> un-enriched, not crashed")
+    }
+
     func test_rateLimited_propagates_from_pass() async throws {
         let searchBody = #"{"items":[{"number":1,"title":"t","html_url":"https://github.com/o/r/pull/1","node_id":"N1","draft":false,"user":{"login":"me"},"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-06-01T10:00:00Z"}]}"#
         let transport = RouteTransport { req in

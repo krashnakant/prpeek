@@ -76,6 +76,25 @@ final class GitHubClientTests: XCTestCase {
         await assertThrows(GitHubError.server(status: 503)) { _ = try await client.getValue(Probe.self, path: "/user") }
     }
 
+    func test_setToken_clears_etag_cache_on_account_switch() async throws {
+        let client = makeClient()
+        URLProtocolStub.handler = { req in
+            (httpResponse(url: req.url!, status: 200, headers: ["ETag": "v1"]),
+             #"{"login":"accountA"}"#.data(using: .utf8)!)
+        }
+        let a: Probe = try await client.getValue(path: "/user")
+        XCTAssertEqual(a.login, "accountA")
+
+        await client.setToken("different-account-token")  // switch account
+        URLProtocolStub.handler = { req in
+            XCTAssertNil(req.value(forHTTPHeaderField: "If-None-Match"),
+                         "token change must flush the cache — no stale conditional request")
+            return (httpResponse(url: req.url!, status: 200), #"{"login":"accountB"}"#.data(using: .utf8)!)
+        }
+        let b: Probe = try await client.getValue(path: "/user")
+        XCTAssertEqual(b.login, "accountB", "must fetch fresh for the new account, not reuse cached body")
+    }
+
     func test_pagination_follows_link_next_to_end() async throws {
         let page2 = "https://api.github.com/things?page=2"
         URLProtocolStub.handler = { req in

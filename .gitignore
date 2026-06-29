@@ -1,0 +1,4 @@
+.build/
+PRPeek.app/
+*.xcodeproj
+.DS_Store

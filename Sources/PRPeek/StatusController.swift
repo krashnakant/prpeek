@@ -116,10 +116,14 @@ final class StatusController: NSObject {
         let alert = NSAlert()
         alert.messageText = "Paste a GitHub token"
         alert.informativeText = "Fine-grained or classic PAT with repo + read:org access."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        // F4: a token is a secret — secure field (masked, no echo), focused so
+        // the user can paste immediately.
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = "ghp_… or github_pat_…"
         alert.accessoryView = field
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
         if alert.runModal() == .alertFirstButtonReturn { model.pastePAT(field.stringValue) }
     }
 

@@ -68,13 +68,6 @@ public enum Classifier {
         return nil
     }
 
-    /// Binary "waiting on me" — derived from `waitReason`.
-    public static func waitingOnMe(isDraft: Bool, author: String,
-                                   ci: CIState, signal: ReviewSignal,
-                                   viewer: ViewerContext) -> Bool {
-        waitReason(isDraft: isDraft, author: author, ci: ci, signal: signal, viewer: viewer) != nil
-    }
-
     /// Roll up check-runs. Precise rule (plan): any failed run -> failing;
     /// else any not-completed -> pending; else passing; no runs -> none.
     /// neutral/skipped/success/stale are treated as NOT failed.

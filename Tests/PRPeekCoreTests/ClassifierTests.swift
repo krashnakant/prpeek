@@ -9,38 +9,38 @@ final class ClassifierTests: XCTestCase {
     }
 
     func test_draft_is_never_waiting() {
-        XCTAssertFalse(Classifier.waitingOnMe(isDraft: true, author: "x", ci: .failing,
-                                              signal: signal(reviewers: ["me"]), viewer: me))
+        XCTAssertNil(Classifier.waitReason(isDraft: true, author: "x", ci: .failing,
+                                           signal: signal(reviewers: ["me"]), viewer: me))
     }
 
     func test_requested_reviewer_is_waiting() {
-        XCTAssertTrue(Classifier.waitingOnMe(isDraft: false, author: "x", ci: .passing,
-                                             signal: signal(reviewers: ["me"]), viewer: me))
+        XCTAssertNotNil(Classifier.waitReason(isDraft: false, author: "x", ci: .passing,
+                                              signal: signal(reviewers: ["me"]), viewer: me))
     }
 
     func test_member_of_requested_team_is_waiting() {
-        XCTAssertTrue(Classifier.waitingOnMe(isDraft: false, author: "x", ci: .passing,
-                                             signal: signal(teams: ["org/reviewers"]), viewer: me))
+        XCTAssertNotNil(Classifier.waitReason(isDraft: false, author: "x", ci: .passing,
+                                              signal: signal(teams: ["org/reviewers"]), viewer: me))
     }
 
     func test_not_member_of_requested_team_is_not_waiting() {
-        XCTAssertFalse(Classifier.waitingOnMe(isDraft: false, author: "x", ci: .passing,
-                                              signal: signal(teams: ["org/other"]), viewer: me))
+        XCTAssertNil(Classifier.waitReason(isDraft: false, author: "x", ci: .passing,
+                                           signal: signal(teams: ["org/other"]), viewer: me))
     }
 
     func test_author_with_failing_ci_is_waiting() {
-        XCTAssertTrue(Classifier.waitingOnMe(isDraft: false, author: "me", ci: .failing,
-                                             signal: signal(), viewer: me))
-    }
-
-    func test_author_with_passing_ci_is_not_waiting() {
-        XCTAssertFalse(Classifier.waitingOnMe(isDraft: false, author: "me", ci: .passing,
+        XCTAssertNotNil(Classifier.waitReason(isDraft: false, author: "me", ci: .failing,
                                               signal: signal(), viewer: me))
     }
 
+    func test_author_with_passing_ci_is_not_waiting() {
+        XCTAssertNil(Classifier.waitReason(isDraft: false, author: "me", ci: .passing,
+                                           signal: signal(), viewer: me))
+    }
+
     func test_unrelated_pr_is_not_waiting() {
-        XCTAssertFalse(Classifier.waitingOnMe(isDraft: false, author: "x", ci: .passing,
-                                              signal: signal(reviewers: ["someoneelse"]), viewer: me))
+        XCTAssertNil(Classifier.waitReason(isDraft: false, author: "x", ci: .passing,
+                                           signal: signal(reviewers: ["someoneelse"]), viewer: me))
     }
 
     // waitReason maps each waiting branch to its reason, priority-ordered.

@@ -21,16 +21,9 @@ public struct URLSessionTransport: Transport {
                 throw GitHubError.invalidResponse
             }
             return (data, http)
-        } catch let urlError as URLError {
-            // offline / timeout / DNS -> the app's "hold + show cached" path
-            switch urlError.code {
-            case .notConnectedToInternet, .networkConnectionLost,
-                 .timedOut, .cannotFindHost, .cannotConnectToHost,
-                 .dnsLookupFailed, .dataNotAllowed:
-                throw GitHubError.network
-            default:
-                throw GitHubError.network
-            }
+        } catch is URLError {
+            // offline / timeout / DNS / etc -> the app's "hold + show cached" path
+            throw GitHubError.network
         }
     }
 }

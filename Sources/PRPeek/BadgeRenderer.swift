@@ -32,8 +32,8 @@ enum BadgeRenderer {
         return image
     }
 
-    /// Colored rounded-rect badge (the headline). template=false keeps the fill.
-    static func pill(text: String, fill: NSColor, template: Bool = false) -> NSImage {
+    /// Colored rounded-rect badge (the headline). isTemplate=false keeps the fill.
+    static func pill(text: String, fill: NSColor) -> NSImage {
         let thickness = NSStatusBar.system.thickness
         let height = thickness - 5
         let font = NSFont.systemFont(ofSize: height * 0.62, weight: .bold)
@@ -50,7 +50,7 @@ enum BadgeRenderer {
         (text as NSString).draw(at: NSPoint(x: (width - textSize.width) / 2,
                                             y: (height - textSize.height) / 2), withAttributes: attrs)
         image.unlockFocus()
-        image.isTemplate = template
+        image.isTemplate = false
         return image
     }
 

@@ -164,7 +164,7 @@ final class StatusController: NSObject {
                                action: nil, keyEquivalent: "")   // submenu = expand; "Open" lives inside it
             i.toolTip = pr.waitReason?.long
             tint(i) { $0.text }
-            i.image = ciImage(pr.ciState)   // semantic SF Symbol, not emoji (F2)
+            i.image = ciImage(pr.ciState, palette: palette)   // semantic SF Symbol, not emoji (F2)
             let sub = PRSubmenu(pr: pr)
             sub.delegate = self                  // menuWillOpen -> lazy-load + populate
             sub.addItem(disabledRow("PR details…"))   // placeholder so the arrow shows; replaced on open
@@ -434,7 +434,7 @@ final class StatusController: NSObject {
         let title = "\(c.message.prefix(56))  ·  \(c.shortSHA)  ·  \(c.author) \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
         // Hover summary: full (untruncated) subject + metadata.
         let tip = "\(c.message)\n\(c.shortSHA) · \(c.author) · \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
-        return linkRow(title: title, image: ciImage(c.ciState), url: c.htmlURL, toolTip: tip)   // per-commit check-runs
+        return linkRow(title: title, image: ciImage(c.ciState, palette: palette), url: c.htmlURL, toolTip: tip)   // per-commit check-runs
     }
 
     private static let age: RelativeDateTimeFormatter = {
@@ -475,7 +475,7 @@ final class StatusController: NSObject {
         case .changesRequested: symbol = "xmark.octagon.fill";  color = palette?.red ?? .systemRed
         case .commented:        symbol = "text.bubble.fill";    color = palette?.subtext ?? .secondaryLabelColor
         }
-        return Self.symbolImage(symbol, color: color)
+        return coloredSymbol(symbol, color)
     }
 
     @objc private func signIn() {
@@ -529,26 +529,6 @@ final class StatusController: NSObject {
         guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(cfg) else { return nil }
         img.isTemplate = true
-        return img
-    }
-    /// CI status as a color SF Symbol (HIG-native, not emoji). Shape + color so
-    /// it's not color-only encoding. Color follows the theme palette when set.
-    private func ciImage(_ s: CIState) -> NSImage? {
-        let symbol: String, color: NSColor
-        switch s {
-        case .passing: symbol = "checkmark.circle.fill"; color = palette?.green ?? .systemGreen
-        case .failing: symbol = "xmark.octagon.fill";    color = palette?.red ?? .systemRed
-        case .pending: symbol = "clock.fill";            color = palette?.yellow ?? .systemYellow
-        case .none:    symbol = "minus.circle";          color = palette?.subtext ?? .tertiaryLabelColor
-        }
-        return Self.symbolImage(symbol, color: color)
-    }
-
-    /// Color SF Symbol that keeps its color in the menu (not template-tinted).
-    private static func symbolImage(_ name: String, color: NSColor) -> NSImage? {
-        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        let img = base.withSymbolConfiguration(.init(paletteColors: [color])) ?? base
-        img.isTemplate = false
         return img
     }
     static let shortTime: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; return f }()

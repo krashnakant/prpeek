@@ -223,7 +223,7 @@ final class DesktopPanel: NSObject {
         row.bezelStyle = .regularSquare
         row.alignment = .left
         row.imagePosition = .imageLeft
-        row.image = ciImage(pr.ciState)
+        row.image = ciImage(pr.ciState, palette: model.palette)
         row.toolTip = "\(pr.repoFullName)#\(pr.number)\n\(pr.title)"
         row.attributedTitle = rowTitle(pr)
         row.setButtonType(.momentaryChange)
@@ -304,22 +304,11 @@ final class DesktopPanel: NSObject {
         footerLabel.textColor = p?.subtext ?? .secondaryLabelColor
     }
 
-    private func ciImage(_ s: CIState) -> NSImage? {
-        let symbol: String, color: NSColor
-        switch s {
-        case .passing: symbol = "checkmark.circle.fill"; color = model.palette?.green ?? .systemGreen
-        case .failing: symbol = "xmark.octagon.fill";    color = model.palette?.red ?? .systemRed
-        case .pending: symbol = "clock.fill";            color = model.palette?.yellow ?? .systemYellow
-        case .none:    symbol = "minus.circle";          color = model.palette?.subtext ?? .tertiaryLabelColor
-        }
-        return Self.symbol(symbol, color: color)
-    }
-
-    private static func symbol(_ name: String, color: NSColor? = nil) -> NSImage {
-        let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) ?? NSImage()
-        let image = color.flatMap { base.withSymbolConfiguration(.init(paletteColors: [$0])) } ?? base
-        image.isTemplate = color == nil
-        return image
+    /// Template SF Symbol for the header buttons — tints to the system label color.
+    private static func symbol(_ name: String) -> NSImage {
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) ?? NSImage()
+        img.isTemplate = true
+        return img
     }
 }
 

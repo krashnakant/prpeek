@@ -129,9 +129,7 @@ public actor GitHubClient {
             throw GitHubError.unauthorized
         case 403, 429:
             throw Self.rateLimitOrForbidden(http)
-        case 500...599:
-            throw GitHubError.server(status: http.statusCode)
-        default:
+        default:                       // 5xx and any other unexpected status
             throw GitHubError.server(status: http.statusCode)
         }
     }

@@ -8,8 +8,23 @@ cd "$(dirname "$0")/.."
 swift build -c release
 APP="PRPeek.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/PRPeek "$APP/Contents/MacOS/PRPeek"
+
+# App icon: build AppIcon.icns from the 1024 source PNG (see Scripts/make-icon.swift).
+ICON_SRC="Assets/AppIcon-1024.png"
+if [ -f "$ICON_SRC" ]; then
+  ICONSET=$(mktemp -d)/AppIcon.iconset
+  mkdir -p "$ICONSET"
+  for s in 16 32 128 256 512; do
+    sips -z "$s" "$s" "$ICON_SRC" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+    sips -z "$((s*2))" "$((s*2))" "$ICON_SRC" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+  rm -rf "$(dirname "$ICONSET")"
+else
+  echo "WARNING: $ICON_SRC missing — app will have no icon. Run: swift Scripts/make-icon.swift"
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -20,6 +35,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>PRPeek</string>
   <key>CFBundleIdentifier</key><string>com.prpeek.app</string>
   <key>CFBundleExecutable</key><string>PRPeek</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>

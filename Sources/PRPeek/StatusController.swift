@@ -55,8 +55,8 @@ final class StatusController: NSObject {
         menu.addItem(.separator())
 
         if signedOut {
-            menu.addItem(action("Sign in with GitHub…", #selector(signIn)))
-            menu.addItem(action("Paste token…", #selector(pasteToken)))
+            menu.addItem(action("Sign in with GitHub…", #selector(signIn), symbol: "person.crop.circle"))
+            menu.addItem(action("Paste token…", #selector(pasteToken), symbol: "key.fill"))
         } else {
             // F3: "All" was a superset of the first two -> every PR shown up to 3×.
             // Third section is the remainder so each PR appears once.
@@ -68,8 +68,8 @@ final class StatusController: NSObject {
             section(menu, "Others", others)
             menu.addItem(.separator())
             menu.addItem(filterReposItem())
-            menu.addItem(action("Refresh now", #selector(refresh)))
-            menu.addItem(action("Sign out", #selector(signOut)))
+            menu.addItem(action("Refresh now", #selector(refresh), symbol: "arrow.clockwise"))
+            menu.addItem(action("Sign out", #selector(signOut), symbol: "rectangle.portrait.and.arrow.right"))
         }
         menu.addItem(.separator())
         menu.addItem(toggle("Desktop panel", isOn: { [weak self] in self?.panel.isVisible ?? false }) {
@@ -77,7 +77,7 @@ final class StatusController: NSObject {
         })
         menu.addItem(intervalItem())
         menu.addItem(themeItem())
-        menu.addItem(action("Quit PRPeek", #selector(quit), key: "q"))
+        menu.addItem(action("Quit PRPeek", #selector(quit), key: "q", symbol: "power"))
 
         // NSApp.appearance alone doesn't repaint a status-item menu — set it on
         // the menu directly. nil = follow the system (System theme). Do NOT theme
@@ -174,6 +174,7 @@ final class StatusController: NSObject {
     private func filterReposItem() -> NSMenuItem {
         let repos = model.knownRepos
         let parent = NSMenuItem(title: "Filter repos", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("line.3.horizontal.decrease.circle")
         let sub = NSMenu(); sub.delegate = self
 
         sub.addItem(toggle("All repos", isOn: { [weak self] in self?.model.repoFilters.isEmpty ?? true }) {
@@ -212,6 +213,7 @@ final class StatusController: NSObject {
 
     private func intervalItem() -> NSMenuItem {
         let parent = NSMenuItem(title: "Refresh interval", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("timer")
         let sub = NSMenu(); sub.delegate = self
         for (label, secs) in Self.intervals {
             sub.addItem(toggle(label, isOn: { [weak self] in self?.model.refreshIntervalSecs == secs }) {
@@ -226,6 +228,7 @@ final class StatusController: NSObject {
 
     private func themeItem() -> NSMenuItem {
         let parent = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("paintpalette")
         let sub = NSMenu(); sub.delegate = self
         for (idx, t) in Theme.allCases.enumerated() {
             if idx == 3 { sub.addItem(.separator()) }   // divide System/Light/Dark from Catppuccin
@@ -264,6 +267,7 @@ final class StatusController: NSObject {
         sub.removeAllItems()
         let open = NSMenuItem(title: "Open PR in browser", action: #selector(openPR(_:)), keyEquivalent: "")
         open.target = self
+        open.image = Self.menuIcon("arrow.up.right.square")
         open.representedObject = sub.pr.htmlURL
         sub.addItem(open)
         sub.addItem(.separator())
@@ -378,10 +382,21 @@ final class StatusController: NSObject {
     }
 
     // MARK: helpers
-    private func action(_ title: String, _ sel: Selector, key: String = "") -> NSMenuItem {
+    private func action(_ title: String, _ sel: Selector, key: String = "", symbol: String? = nil) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
         i.target = self
+        if let symbol { i.image = Self.menuIcon(symbol) }
         return i
+    }
+
+    /// Template SF Symbol for a menu row — tints to the menu's label color, so it
+    /// follows the active theme without per-palette wiring.
+    private static func menuIcon(_ name: String) -> NSImage? {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(cfg) else { return nil }
+        img.isTemplate = true
+        return img
     }
     /// CI status as a color SF Symbol (HIG-native, not emoji). Shape + color so
     /// it's not color-only encoding. Color follows the theme palette when set.

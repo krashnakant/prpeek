@@ -1,8 +1,9 @@
 name: CodeQL
 
-# Advanced setup (replaces GitHub default setup). Swift uses build-mode: none —
-# buildless extraction — because autobuild can't get the macOS 26 / Swift 6.2 SDK
-# (default setup has no setup-xcode step), which made the Swift analysis flaky.
+# Advanced setup (replaces GitHub default setup). Swift has no buildless mode, so
+# we use build-mode: manual and run the build ourselves with the right Xcode —
+# default setup's autobuild couldn't get the macOS 26 / Swift 6.2 SDK (no
+# setup-xcode step), which made the Swift analysis flaky. Actions uses none.
 on:
   push:
     branches: [main]
@@ -25,7 +26,7 @@ jobs:
       matrix:
         include:
           - language: swift
-            build-mode: none
+            build-mode: manual
           - language: actions
             build-mode: none
     steps:
@@ -34,6 +35,14 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+      # Swift: build between init and analyze so CodeQL traces the compiler.
+      # Same Xcode pin as ci.yml so the macOS 26 SDK is present.
+      - if: matrix.build-mode == 'manual'
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+      - if: matrix.build-mode == 'manual'
+        run: swift build
       - uses: github/codeql-action/analyze@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
         with:
           category: "/language:${{ matrix.language }}"

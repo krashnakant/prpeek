@@ -26,7 +26,7 @@ public struct RefreshEngine: Sendable {
 
     /// Refresh with a known viewer (lets the app cache identity across passes).
     public func refresh(filters: [String], viewer: ViewerContext) async throws -> [PullRequest] {
-        let base = try await search.openPRsInvolvingMe(filters: filters)
+        let base = try await search.openPRsInvolvingMe(filters: filters, teamKeys: viewer.teamKeys)
         return try await mapConcurrent(base, limit: concurrencyLimit) { pr in
             do {
                 return try await enrich(pr, viewer: viewer)

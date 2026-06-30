@@ -49,15 +49,31 @@ public struct SearchService: Sendable {
 
     /// `filters` = curated "owner/name" repos. Empty = everything involving you.
     /// Multiple `repo:` qualifiers OR together (narrow to those repos).
-    public func openPRsInvolvingMe(filters: [String] = [], maxItems: Int = 1000) async throws -> [PullRequest] {
-        let items: [SearchItem] = try await client.getSearchItems(
-            pathAndQuery: Self.searchPath(filters: filters), maxItems: maxItems)
-        return items.map { $0.toPullRequest() }
+    ///
+    /// `involves:@me` covers author / assignee / mention / commenter / individual
+    /// review-request — but NOT a PR where only your *team* is requested (the
+    /// common CODEOWNERS flow). Search has no OR across qualifiers, so each team
+    /// gets its own `team-review-requested:org/slug` query and we union by id.
+    public func openPRsInvolvingMe(filters: [String] = [], teamKeys: Set<String> = [],
+                                   maxItems: Int = 1000) async throws -> [PullRequest] {
+        var queries = [Self.searchPath(filters: filters)]
+        queries += teamKeys.sorted().map {
+            Self.searchPath(filters: filters, involvement: "team-review-requested:\($0)")
+        }
+        var byID: [String: PullRequest] = [:]
+        for path in queries {
+            let items: [SearchItem] = try await client.getSearchItems(pathAndQuery: path, maxItems: maxItems)
+            for item in items { byID[item.nodeID] = item.toPullRequest() }
+        }
+        // Deterministic, newest-first (dict order isn't stable -> menu would jitter).
+        return Array(byID.values.sorted {
+            $0.updatedAt != $1.updatedAt ? $0.updatedAt > $1.updatedAt : $0.number < $1.number
+        }.prefix(maxItems))
     }
 
     /// Build "/search/issues?q=...&per_page=100" with the query percent-encoded.
-    static func searchPath(filters: [String]) -> String {
-        var terms = ["is:pr", "is:open", "archived:false", "involves:@me"]
+    static func searchPath(filters: [String], involvement: String = "involves:@me") -> String {
+        var terms = ["is:pr", "is:open", "archived:false", involvement]
         terms += filters.map { "repo:\($0)" }
         let q = terms.joined(separator: " ")
         var comps = URLComponents()
@@ -68,6 +84,7 @@ public struct SearchService: Sendable {
 }
 
 // ponytail: the Search API's 30 req/min cap is enforced by the poller's cadence
-// (T6) — one coalesced pass paginates ≤10 requests (1000/100), far under 30.
-// A per-call limiter here would be belt-and-suspenders; add it only if a future
-// fast `/notifications` tier polls search sub-minute.
+// (T6) — a pass paginates ≤10 requests (1000/100) per query × (1 + team count),
+// still far under 30 for any realistic membership on the 3-min cadence. Add a
+// per-call limiter only if a future fast `/notifications` tier polls sub-minute,
+// or someone is on dozens of teams.

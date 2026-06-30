@@ -36,6 +36,29 @@ final class SearchTests: XCTestCase {
         XCTAssertFalse(pr.isDraft)
     }
 
+    func test_team_review_requested_query_unions_and_dedupes() async throws {
+        // involves:@me returns PR 1; the team query returns PR 1 (dupe) + PR 2.
+        // Result must contain both, exactly once, newest-first.
+        @Sendable func item(_ n: Int, node: String, updated: String) -> String {
+            #"{"number":\#(n),"title":"t","html_url":"https://github.com/o/r/pull/\#(n)","node_id":"\#(node)","draft":false,"user":{"login":"u"},"repository_url":"https://api.github.com/repos/o/r","updated_at":"\#(updated)"}"#
+        }
+        URLProtocolStub.handler = { req in
+            let q = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "q" })?.value ?? ""
+            if q.contains("team-review-requested:org/eng") {
+                XCTAssertFalse(q.contains("involves:@me"))
+                return (httpResponse(url: req.url!, status: 200),
+                        Data(#"{"items":[\#(item(1, node: "N1", updated: "2026-06-01T10:00:00Z")),\#(item(2, node: "N2", updated: "2026-06-02T10:00:00Z"))]}"#.utf8))
+            }
+            XCTAssertTrue(q.contains("involves:@me"))
+            return (httpResponse(url: req.url!, status: 200),
+                    Data(#"{"items":[\#(item(1, node: "N1", updated: "2026-06-01T10:00:00Z"))]}"#.utf8))
+        }
+        let client = GitHubClient(transport: URLSessionTransport(session: URLProtocolStub.session()), token: "t")
+        let prs = try await SearchService(client: client).openPRsInvolvingMe(teamKeys: ["org/eng"])
+        XCTAssertEqual(prs.map(\.id), ["N2", "N1"], "union, deduped, newest-first")
+    }
+
     func test_paginates_and_caps_at_maxItems() async throws {
         // page 1 -> Link next; each page has 2 items. Cap at 3 => stop early.
         let page2 = "https://api.github.com/search/issues?q=x&page=2"

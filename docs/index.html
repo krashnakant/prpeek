@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRPeek — your GitHub PRs in the menu bar</title>
+<meta name="description" content="A native macOS menubar app that watches your open GitHub pull requests and tells you, at a glance, which ones are waiting on you.">
+<meta property="og:title" content="PRPeek">
+<meta property="og:description" content="macOS menubar watcher for your open GitHub PRs — see what needs you at a glance.">
+<meta property="og:image" content="https://krashnakant.github.io/prpeek/icon.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="icon.png">
+<style>
+  :root {
+    --bg: #fbfbfd; --panel: #ffffff; --text: #1d1d1f; --sub: #6e6e73;
+    --line: rgba(0,0,0,.08); --accent: #d20f39; --accent-2: #0969da;
+    --green: #1a7f37; --shadow: 0 1px 3px rgba(0,0,0,.06), 0 12px 40px rgba(0,0,0,.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0b0d; --panel: #161618; --text: #f5f5f7; --sub: #98989d;
+      --line: rgba(255,255,255,.10); --accent: #ff6b81; --accent-2: #4493f8;
+      --green: #3fb950; --shadow: 0 1px 3px rgba(0,0,0,.4), 0 16px 50px rgba(0,0,0,.5);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+
+  /* Hero */
+  header { text-align: center; padding: 88px 0 64px; }
+  .icon {
+    width: 132px; height: 132px; border-radius: 28px; box-shadow: var(--shadow);
+    margin-bottom: 28px;
+  }
+  h1 { font-size: 56px; letter-spacing: -.03em; margin: 0 0 10px; font-weight: 700; }
+  .tagline { font-size: 22px; color: var(--sub); max-width: 620px; margin: 0 auto 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--sub); max-width: 600px; margin: 0 auto 36px; }
+  .lede b { color: var(--text); font-weight: 600; }
+  .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; align-items: center; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 13px 26px; border-radius: 12px;
+    font-weight: 600; font-size: 16px; transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .btn:hover { text-decoration: none; transform: translateY(-1px); }
+  .btn-primary { background: var(--accent); color: #fff; box-shadow: 0 6px 20px rgba(210,15,57,.28); }
+  .btn-ghost { background: var(--panel); color: var(--text); border: 1px solid var(--line); box-shadow: var(--shadow); }
+  .meta { margin-top: 18px; font-size: 13px; color: var(--sub); }
+  .meta code { font-size: 12px; }
+
+  /* Badge demo */
+  .demo {
+    display: inline-flex; align-items: center; gap: 0; margin: 40px auto 0;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 7px 12px; box-shadow: var(--shadow); font-size: 14px; font-weight: 600;
+  }
+  .pill { background: var(--accent); color: #fff; border-radius: 999px; padding: 2px 9px; font-size: 13px; margin-left: 8px; }
+
+  /* Sections */
+  section { padding: 56px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 30px; letter-spacing: -.02em; margin: 0 0 8px; text-align: center; }
+  .sub { text-align: center; color: var(--sub); margin: 0 auto 40px; max-width: 560px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 24px;
+    box-shadow: var(--shadow);
+  }
+  .card h3 { margin: 0 0 6px; font-size: 17px; letter-spacing: -.01em; }
+  .card p { margin: 0; color: var(--sub); font-size: 14.5px; }
+  .card .ic { font-size: 22px; margin-bottom: 12px; display: block; }
+
+  /* Install */
+  .steps { max-width: 680px; margin: 0 auto; }
+  ol.steps { padding-left: 0; counter-reset: s; list-style: none; }
+  ol.steps li {
+    counter-increment: s; position: relative; padding: 16px 0 16px 52px; border-bottom: 1px solid var(--line);
+  }
+  ol.steps li:last-child { border-bottom: 0; }
+  ol.steps li::before {
+    content: counter(s); position: absolute; left: 0; top: 14px; width: 32px; height: 32px;
+    background: var(--accent); color: #fff; border-radius: 50%; display: grid; place-items: center;
+    font-weight: 700; font-size: 15px;
+  }
+  ol.steps li b { font-weight: 600; }
+  pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    overflow-x: auto; font-size: 13px; margin: 10px 0 0;
+    font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
+  }
+  .note { text-align: center; color: var(--sub); font-size: 13.5px; margin-top: 28px; }
+
+  footer { padding: 48px 0 64px; text-align: center; color: var(--sub); font-size: 14px; border-top: 1px solid var(--line); }
+  footer a { color: var(--sub); }
+  .links { display: flex; gap: 20px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
+
+  @media (max-width: 560px) {
+    h1 { font-size: 40px; } .tagline { font-size: 19px; } header { padding: 56px 0 44px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <img class="icon" src="icon.png" alt="PRPeek app icon" width="132" height="132">
+    <h1>PRPeek</h1>
+    <p class="tagline">Your GitHub pull requests, in the menu bar.</p>
+    <p class="lede">A native macOS app that watches your open PRs — across your personal repos <b>and</b> every org you're in — and tells you, at a glance, which ones are <b>waiting on you</b>.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/krashnakant/prpeek/releases/latest">Download for macOS</a>
+      <a class="btn btn-ghost" href="https://github.com/krashnakant/prpeek">View on GitHub</a>
+    </div>
+    <p class="meta">macOS 26 (Tahoe)+ · Swift 6 · MIT · ad-hoc signed (not notarized)</p>
+    <div class="demo">PRPeek <span class="pill">3 need you</span></div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Everything that matters, glanceable</h2>
+    <p class="sub">No browser tab-hopping. One color-coded count in your menu bar — red when something needs you, calm at inbox zero.</p>
+    <div class="grid">
+      <div class="card"><span class="ic">🔴</span><h3>Glanceable badge</h3><p>A red pill with the count of PRs waiting on you; monochrome when none; a checkmark at inbox zero. The badge doesn't lie.</p></div>
+      <div class="card"><span class="ic">🎯</span><h3>Precise "waiting on me"</h3><p>Excludes drafts, honors live review requests (incl. team requests via CODEOWNERS), and your own PRs with failing required checks.</p></div>
+      <div class="card"><span class="ic">💬</span><h3>Shows why</h3><p>Each row says the reason inline — review requested, team review, CI failing — so the badge is more than a binary signal.</p></div>
+      <div class="card"><span class="ic">🔕</span><h3>Snooze &amp; mute</h3><p>Hush a noisy PR for 1h, 4h, or until it next changes. A "hide until updated" snooze re-notifies once when the PR actually moves.</p></div>
+      <div class="card"><span class="ic">🔎</span><h3>Search everything</h3><p>A keyboard-first window (⌘F) over all loaded PRs — filter live by repo, number, title, or author. ↑↓ to move, Enter to open.</p></div>
+      <div class="card"><span class="ic">🔔</span><h3>Native notifications</h3><p>Fires only on the transition — review requested, your CI fails — deduped, no storm on launch. Click to open the PR.</p></div>
+      <div class="card"><span class="ic">🎨</span><h3>Make it yours</h3><p>Themes (System / Light / Dark / Catppuccin), configurable refresh, an optional always-on-desktop panel, and launch-at-login.</p></div>
+      <div class="card"><span class="ic">🏢</span><h3>GitHub Enterprise</h3><p>Point it at your GHES host; the rest is the same. Two ways to sign in: a read-only PAT, or OAuth device flow.</p></div>
+      <div class="card"><span class="ic">🔋</span><h3>Cheap &amp; laptop-aware</h3><p>ETag conditional requests make idle polls nearly free. Pauses on sleep, refreshes once on wake, holds cached when offline.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Install in a minute</h2>
+    <p class="sub">No App Store, no account. Download, drag, open.</p>
+    <div class="steps">
+      <ol class="steps">
+        <li><b>Download <code>PRPeek.dmg</code></b> from the <a href="https://github.com/krashnakant/prpeek/releases/latest">latest release</a> and drag PRPeek to Applications.</li>
+        <li><b>First launch:</b> right-click ▸ Open, then Open in the dialog. The DMG is ad-hoc signed, so Gatekeeper asks once. <pre>xattr -dr com.apple.quarantine /Applications/PRPeek.app</pre></li>
+        <li><b>Sign in:</b> paste a read-only fine-grained PAT (least privilege), or use OAuth device flow. Your token lives in the macOS Keychain.</li>
+        <li><b>Done.</b> The badge turns red with your "needs me" count. Click any PR to open it; expand for commits + review comments.</li>
+      </ol>
+    </div>
+    <p class="note">Prefer to build it yourself? <code>git clone</code> · <code>bash Scripts/make-app.sh</code> · <code>open PRPeek.app</code>. Requires Xcode 26+.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Read-only by design</h2>
+    <p class="sub">PRPeek talks only to GitHub, holds one credential, and ships zero analytics or network telemetry.</p>
+    <div class="grid">
+      <div class="card"><span class="ic">🔐</span><h3>Token in the Keychain</h3><p>Stored as a generic password, never in the on-disk cache. The cache holds only PR metadata — titles, repo, author, CI state.</p></div>
+      <div class="card"><span class="ic">✅</span><h3>Least privilege</h3><p>The app makes no write calls. A read-only fine-grained PAT is all it needs; granting write is unnecessary.</p></div>
+      <div class="card"><span class="ic">📦</span><h3>No dependencies</h3><p>Zero SwiftPM deps — no transitive CVE or install-script supply-chain surface. CI actions pinned to commit SHAs.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="links">
+      <a href="https://github.com/krashnakant/prpeek">GitHub</a>
+      <a href="https://github.com/krashnakant/prpeek/releases/latest">Releases</a>
+      <a href="https://github.com/krashnakant/prpeek#readme">Docs</a>
+      <a href="https://github.com/krashnakant/prpeek/security/advisories/new">Report a vulnerability</a>
+    </div>
+    <p>MIT licensed · Built with Swift 6 · Not affiliated with GitHub.</p>
+  </div>
+</footer>
+</body>
+</html>

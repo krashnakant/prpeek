@@ -41,6 +41,7 @@ enum Theme: String, CaseIterable {
 
     var nsAppearance: NSAppearance? { appearanceName.flatMap(NSAppearance.init(named:)) }
 
+    @MainActor
     static func apply(_ t: Theme) { NSApp.appearance = t.nsAppearance }
 }
 

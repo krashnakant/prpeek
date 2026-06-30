@@ -141,7 +141,8 @@ a PR for its commits + review comments.
 ## Security
 
 PRPeek is a read-only client. It talks only to GitHub, holds one credential, and
-ships no telemetry.
+ships no analytics or network telemetry. The app uses Apple's local unified
+logging (`OSLog`) for diagnostic lifecycle/action events.
 
 - **Token at rest** — stored in the macOS **Keychain** (generic password), never
   in the on-disk cache. The cache (`~/Library/Application Support/PRPeek/`) holds

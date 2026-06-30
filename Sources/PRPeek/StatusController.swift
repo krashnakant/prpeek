@@ -39,7 +39,14 @@ final class StatusController: NSObject {
 
         // Don't rebuild while the menu is open — it would close a sticky toggle
         // session. Flush on close (menuDidClose).
-        if openMenus > 0 { pendingRender = true; return }
+        if openMenus > 0 {
+            pendingRender = true
+            AppLog.statusMenu.debug("Deferred menu render while menu tree is open")
+            return
+        }
+        AppLog.statusMenu.debug(
+            "Rendering menu status=\(self.model.status.logName, privacy: .public) needsMe=\(self.model.needsMe.count, privacy: .public) mine=\(self.model.mine.count, privacy: .public) all=\(self.model.all.count, privacy: .public)"
+        )
 
         // Badge
         let signedOut = model.status == .signedOut
@@ -60,6 +67,9 @@ final class StatusController: NSObject {
         if signedOut {
             menu.addItem(action("Sign in with GitHub…", #selector(signIn), symbol: "person.crop.circle"))
             menu.addItem(action("Paste token…", #selector(pasteToken), symbol: "key.fill"))
+            menu.addItem(.separator())
+            menu.addItem(desktopPanelItem())
+            menu.addItem(preferencesItem())
         } else {
             // F3: "All" was a superset of the first two -> every PR shown up to 3×.
             // Remaining sections show the remainder so each PR appears once.
@@ -77,20 +87,14 @@ final class StatusController: NSObject {
             if !model.muted.isEmpty { section(menu, "Muted", model.muted) }
             menu.addItem(.separator())
             menu.addItem(action("Search PRs…", #selector(openSearch), key: "f", symbol: "magnifyingglass"))
-            menu.addItem(filterReposItem())
             menu.addItem(action("Refresh now", #selector(refresh), symbol: "arrow.clockwise"))
+            menu.addItem(filterReposItem())
+            menu.addItem(.separator())
+            menu.addItem(desktopPanelItem())
+            menu.addItem(preferencesItem())
+            menu.addItem(.separator())
             menu.addItem(action("Sign out", #selector(signOut), symbol: "rectangle.portrait.and.arrow.right"))
         }
-        menu.addItem(.separator())
-        menu.addItem(toggle("Launch at login", isOn: { [weak self] in self?.model.launchAtLogin ?? false }) {
-            [weak self] in guard let self else { return }; self.model.setLaunchAtLogin(!self.model.launchAtLogin)
-        })
-        menu.addItem(toggle("Desktop panel", isOn: { [weak self] in self?.panel.isVisible ?? false }) {
-            [weak self] in self?.panel.toggle()
-        })
-        menu.addItem(intervalItem())
-        menu.addItem(themeItem())
-        menu.addItem(action("GitHub host…", #selector(setHost), symbol: "server.rack"))
         menu.addItem(action("Quit PRPeek", #selector(quit), key: "q", symbol: "power"))
 
         // NSApp.appearance alone doesn't repaint a status-item menu — set it on
@@ -176,13 +180,29 @@ final class StatusController: NSObject {
 
     // MARK: actions
     @objc private func openPR(_ sender: NSMenuItem) {
+        AppLog.statusMenu.info("Open PR action selected")
         if let url = sender.representedObject as? URL { NSWorkspace.shared.open(url) }
     }
-    @objc private func openAll() { NSWorkspace.shared.open(URL(string: "https://github.com/pulls")!) }
-    @objc private func refresh() { model.kickRefresh() }
-    @objc private func openSearch() { search.show() }
-    @objc private func signOut() { model.signOut() }
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func openAll() {
+        AppLog.statusMenu.info("Open GitHub pulls action selected")
+        NSWorkspace.shared.open(URL(string: "https://github.com/pulls")!)
+    }
+    @objc private func refresh() {
+        AppLog.statusMenu.info("Manual refresh action selected")
+        model.kickRefresh()
+    }
+    @objc private func openSearch() {
+        AppLog.statusMenu.info("Search PRs action selected")
+        search.show()
+    }
+    @objc private func signOut() {
+        AppLog.statusMenu.info("Sign out action selected")
+        model.signOut()
+    }
+    @objc private func quit() {
+        AppLog.statusMenu.info("Quit action selected")
+        NSApp.terminate(nil)
+    }
 
     // MARK: mute / snooze
 
@@ -209,16 +229,19 @@ final class StatusController: NSObject {
     }
     @objc private func snoozePR(_ sender: NSMenuItem) {
         guard let pr = sender.representedObject as? PullRequest else { return }
+        AppLog.statusMenu.info("Snooze action selected seconds=\(sender.tag, privacy: .public)")
         if sender.tag > 0 { model.mute(pr, for: TimeInterval(sender.tag)) }
         else { model.muteUntilUpdated(pr) }
     }
     @objc private func unmutePR(_ sender: NSMenuItem) {
         guard let pr = sender.representedObject as? PullRequest else { return }
+        AppLog.statusMenu.info("Unmute action selected")
         model.unmute(pr)
     }
 
     // MARK: GitHub Enterprise host
     @objc private func setHost() {
+        AppLog.statusMenu.info("GitHub host settings action selected")
         let alert = NSAlert()
         alert.messageText = "GitHub Enterprise host"
         alert.informativeText = "Hostname only, e.g. github.acme.com. Leave blank for github.com. "
@@ -273,9 +296,44 @@ final class StatusController: NSObject {
     }
 
     private func toggleRepoFilter(_ repo: String) {
+        AppLog.statusMenu.info("Repo filter toggled")
         var current = Set(model.repoFilters.isEmpty ? model.knownRepos : model.repoFilters)
         if current.contains(repo) { current.remove(repo) } else { current.insert(repo) }
         model.setRepoFilters(Array(current))
+    }
+
+    // MARK: desktop panel
+
+    private func desktopPanelItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Desktop panel", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("rectangle.on.rectangle")
+        let sub = NSMenu(); sub.delegate = self
+        sub.addItem(toggle("Show panel", isOn: { [weak self] in self?.panel.isVisible ?? false }) {
+            [weak self] in self?.panel.toggle()
+        })
+        sub.addItem(toggle("Keep panel on top", isOn: { [weak self] in self?.panel.keepOnTop ?? true }) {
+            [weak self] in
+            guard let panel = self?.panel else { return }
+            panel.setKeepOnTop(!panel.keepOnTop)
+        })
+        parent.submenu = sub
+        return parent
+    }
+
+    // MARK: preferences
+
+    private func preferencesItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Preferences", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("gearshape")
+        let sub = NSMenu(); sub.delegate = self
+        sub.addItem(toggle("Launch at login", isOn: { [weak self] in self?.model.launchAtLogin ?? false }) {
+            [weak self] in guard let self else { return }; self.model.setLaunchAtLogin(!self.model.launchAtLogin)
+        })
+        sub.addItem(intervalItem())
+        sub.addItem(themeItem())
+        sub.addItem(action("GitHub host…", #selector(setHost), symbol: "server.rack"))
+        parent.submenu = sub
+        return parent
     }
 
     // MARK: refresh interval
@@ -423,10 +481,12 @@ final class StatusController: NSObject {
     @objc private func signIn() {
         // Non-blocking: copies the code, opens the pre-filled URL, shows progress
         // in the menu status row. No modal that would stall polling.
+        AppLog.statusMenu.info("Device sign-in action selected")
         model.signInWithDeviceFlow()
     }
 
     @objc private func pasteToken() {
+        AppLog.statusMenu.info("Paste token action selected")
         let alert = NSAlert()
         alert.messageText = "Paste a GitHub token"
         // Least privilege: a read-only fine-grained PAT is preferred over "Sign in"
@@ -507,18 +567,23 @@ extension StatusController: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         openMenus += 1
         if let sub = menu as? PRSubmenu {
+            AppLog.statusMenu.debug("PR submenu opened")
             model.loadComments(for: sub.pr)
             model.loadCommits(for: sub.pr)
             populate(sub)   // reflect "Loading…" immediately; onSubmenuReload repopulates with content
+        } else {
+            AppLog.statusMenu.debug("Status menu opened")
         }
     }
 
     func menuDidClose(_ menu: NSMenu) {
         openMenus = max(0, openMenus - 1)
+        AppLog.statusMenu.debug("Menu closed remainingOpenMenus=\(self.openMenus, privacy: .public)")
         // When the whole menu tree has closed, apply any rebuild we deferred
         // while it was open (theme recolor, refreshed PR list, …).
         if openMenus == 0, pendingRender {
             pendingRender = false
+            AppLog.statusMenu.debug("Flushing deferred menu render")
             render()
         }
     }

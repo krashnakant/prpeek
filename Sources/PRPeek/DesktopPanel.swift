@@ -30,7 +30,7 @@ final class DesktopPanel: NSObject {
 
     func toggle() {
         let willShow = !isVisible
-        AppTelemetry.desktopPanel.info("Desktop panel toggled visible=\(willShow, privacy: .public)")
+        AppLog.desktopPanel.info("Desktop panel toggled visible=\(willShow, privacy: .public)")
         isVisible ? hide() : show()
     }
 
@@ -38,7 +38,7 @@ final class DesktopPanel: NSObject {
         if window == nil { window = makeWindow() }
         UserDefaults.standard.set(true, forKey: Self.showKey)
         applyWindowPlacement()
-        AppTelemetry.desktopPanel.info("Desktop panel shown")
+        AppLog.desktopPanel.info("Desktop panel shown")
         window?.orderFrontRegardless()
         refresh()
     }
@@ -46,14 +46,14 @@ final class DesktopPanel: NSObject {
     func hide() {
         window?.orderOut(nil)
         UserDefaults.standard.set(false, forKey: Self.showKey)
-        AppTelemetry.desktopPanel.info("Desktop panel hidden")
+        AppLog.desktopPanel.info("Desktop panel hidden")
     }
 
     func setKeepOnTop(_ on: Bool) {
         guard on != keepOnTop else { return }
         UserDefaults.standard.set(on, forKey: Self.keepOnTopKey)
         applyWindowPlacement()
-        AppTelemetry.desktopPanel.info("Desktop panel keep-on-top changed enabled=\(on, privacy: .public)")
+        AppLog.desktopPanel.info("Desktop panel keep-on-top changed enabled=\(on, privacy: .public)")
     }
 
     /// Re-render from the model. Cheap; called on every model change.
@@ -85,18 +85,18 @@ final class DesktopPanel: NSObject {
     // MARK: - Actions
 
     @objc private func refreshClicked() {
-        AppTelemetry.desktopPanel.info("Desktop panel refresh clicked")
+        AppLog.desktopPanel.info("Desktop panel refresh clicked")
         model.kickRefresh()
     }
 
     @objc private func closeClicked() {
-        AppTelemetry.desktopPanel.info("Desktop panel close clicked")
+        AppLog.desktopPanel.info("Desktop panel close clicked")
         hide()
     }
 
     @objc private func openPR(_ sender: PRRowButton) {
         guard let url = sender.url else { return }
-        AppTelemetry.desktopPanel.info("Desktop panel PR row opened")
+        AppLog.desktopPanel.info("Desktop panel PR row opened")
         NSWorkspace.shared.open(url)
     }
 

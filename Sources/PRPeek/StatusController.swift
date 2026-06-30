@@ -41,11 +41,11 @@ final class StatusController: NSObject {
         // session. Flush on close (menuDidClose).
         if openMenus > 0 {
             pendingRender = true
-            AppTelemetry.statusMenu.debug("Deferred menu render while menu tree is open")
+            AppLog.statusMenu.debug("Deferred menu render while menu tree is open")
             return
         }
-        AppTelemetry.statusMenu.debug(
-            "Rendering menu status=\(self.model.status.telemetryName, privacy: .public) needsMe=\(self.model.needsMe.count, privacy: .public) mine=\(self.model.mine.count, privacy: .public) all=\(self.model.all.count, privacy: .public)"
+        AppLog.statusMenu.debug(
+            "Rendering menu status=\(self.model.status.logName, privacy: .public) needsMe=\(self.model.needsMe.count, privacy: .public) mine=\(self.model.mine.count, privacy: .public) all=\(self.model.all.count, privacy: .public)"
         )
 
         // Badge
@@ -180,27 +180,27 @@ final class StatusController: NSObject {
 
     // MARK: actions
     @objc private func openPR(_ sender: NSMenuItem) {
-        AppTelemetry.statusMenu.info("Open PR action selected")
+        AppLog.statusMenu.info("Open PR action selected")
         if let url = sender.representedObject as? URL { NSWorkspace.shared.open(url) }
     }
     @objc private func openAll() {
-        AppTelemetry.statusMenu.info("Open GitHub pulls action selected")
+        AppLog.statusMenu.info("Open GitHub pulls action selected")
         NSWorkspace.shared.open(URL(string: "https://github.com/pulls")!)
     }
     @objc private func refresh() {
-        AppTelemetry.statusMenu.info("Manual refresh action selected")
+        AppLog.statusMenu.info("Manual refresh action selected")
         model.kickRefresh()
     }
     @objc private func openSearch() {
-        AppTelemetry.statusMenu.info("Search PRs action selected")
+        AppLog.statusMenu.info("Search PRs action selected")
         search.show()
     }
     @objc private func signOut() {
-        AppTelemetry.statusMenu.info("Sign out action selected")
+        AppLog.statusMenu.info("Sign out action selected")
         model.signOut()
     }
     @objc private func quit() {
-        AppTelemetry.statusMenu.info("Quit action selected")
+        AppLog.statusMenu.info("Quit action selected")
         NSApp.terminate(nil)
     }
 
@@ -229,19 +229,19 @@ final class StatusController: NSObject {
     }
     @objc private func snoozePR(_ sender: NSMenuItem) {
         guard let pr = sender.representedObject as? PullRequest else { return }
-        AppTelemetry.statusMenu.info("Snooze action selected seconds=\(sender.tag, privacy: .public)")
+        AppLog.statusMenu.info("Snooze action selected seconds=\(sender.tag, privacy: .public)")
         if sender.tag > 0 { model.mute(pr, for: TimeInterval(sender.tag)) }
         else { model.muteUntilUpdated(pr) }
     }
     @objc private func unmutePR(_ sender: NSMenuItem) {
         guard let pr = sender.representedObject as? PullRequest else { return }
-        AppTelemetry.statusMenu.info("Unmute action selected")
+        AppLog.statusMenu.info("Unmute action selected")
         model.unmute(pr)
     }
 
     // MARK: GitHub Enterprise host
     @objc private func setHost() {
-        AppTelemetry.statusMenu.info("GitHub host settings action selected")
+        AppLog.statusMenu.info("GitHub host settings action selected")
         let alert = NSAlert()
         alert.messageText = "GitHub Enterprise host"
         alert.informativeText = "Hostname only, e.g. github.acme.com. Leave blank for github.com. "
@@ -296,7 +296,7 @@ final class StatusController: NSObject {
     }
 
     private func toggleRepoFilter(_ repo: String) {
-        AppTelemetry.statusMenu.info("Repo filter toggled")
+        AppLog.statusMenu.info("Repo filter toggled")
         var current = Set(model.repoFilters.isEmpty ? model.knownRepos : model.repoFilters)
         if current.contains(repo) { current.remove(repo) } else { current.insert(repo) }
         model.setRepoFilters(Array(current))
@@ -481,12 +481,12 @@ final class StatusController: NSObject {
     @objc private func signIn() {
         // Non-blocking: copies the code, opens the pre-filled URL, shows progress
         // in the menu status row. No modal that would stall polling.
-        AppTelemetry.statusMenu.info("Device sign-in action selected")
+        AppLog.statusMenu.info("Device sign-in action selected")
         model.signInWithDeviceFlow()
     }
 
     @objc private func pasteToken() {
-        AppTelemetry.statusMenu.info("Paste token action selected")
+        AppLog.statusMenu.info("Paste token action selected")
         let alert = NSAlert()
         alert.messageText = "Paste a GitHub token"
         // Least privilege: a read-only fine-grained PAT is preferred over "Sign in"
@@ -567,23 +567,23 @@ extension StatusController: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         openMenus += 1
         if let sub = menu as? PRSubmenu {
-            AppTelemetry.statusMenu.debug("PR submenu opened")
+            AppLog.statusMenu.debug("PR submenu opened")
             model.loadComments(for: sub.pr)
             model.loadCommits(for: sub.pr)
             populate(sub)   // reflect "Loading…" immediately; onSubmenuReload repopulates with content
         } else {
-            AppTelemetry.statusMenu.debug("Status menu opened")
+            AppLog.statusMenu.debug("Status menu opened")
         }
     }
 
     func menuDidClose(_ menu: NSMenu) {
         openMenus = max(0, openMenus - 1)
-        AppTelemetry.statusMenu.debug("Menu closed remainingOpenMenus=\(self.openMenus, privacy: .public)")
+        AppLog.statusMenu.debug("Menu closed remainingOpenMenus=\(self.openMenus, privacy: .public)")
         // When the whole menu tree has closed, apply any rebuild we deferred
         // while it was open (theme recolor, refreshed PR list, …).
         if openMenus == 0, pendingRender {
             pendingRender = false
-            AppTelemetry.statusMenu.debug("Flushing deferred menu render")
+            AppLog.statusMenu.debug("Flushing deferred menu render")
             render()
         }
     }

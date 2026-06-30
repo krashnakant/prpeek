@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-enum AppTelemetry {
+enum AppLog {
     static let subsystem = Bundle.main.bundleIdentifier ?? "PRPeek"
 
     static let statusMenu = Logger(subsystem: subsystem, category: "StatusMenu")
@@ -12,7 +12,7 @@ enum AppTelemetry {
 }
 
 extension AppStatus {
-    var telemetryName: String {
+    var logName: String {
         switch self {
         case .signedOut: return "signedOut"
         case .authorizing: return "authorizing"

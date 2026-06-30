@@ -84,19 +84,19 @@ final class AppModel {
     func isMuted(_ pr: PullRequest) -> Bool { state.isMuted(pr, now: Date()) }
     /// Snooze for a fixed window (e.g. 1h, 4h).
     func mute(_ pr: PullRequest, for interval: TimeInterval) {
-        AppTelemetry.appModel.info("Muted PR for seconds=\(Int(interval), privacy: .public)")
+        AppLog.appModel.info("Muted PR for seconds=\(Int(interval), privacy: .public)")
         state.mutes[pr.id] = Mute(updatedAtSnapshot: pr.updatedAt, until: Date().addingTimeInterval(interval))
         saveState(); onChange?()
     }
     /// Hide until the PR changes (its `updatedAt` moves).
     func muteUntilUpdated(_ pr: PullRequest) {
-        AppTelemetry.appModel.info("Muted PR until update")
+        AppLog.appModel.info("Muted PR until update")
         state.mutes[pr.id] = Mute(updatedAtSnapshot: pr.updatedAt, until: nil)
         saveState(); onChange?()
     }
     func unmute(_ pr: PullRequest) {
         guard state.mutes.removeValue(forKey: pr.id) != nil else { return }
-        AppTelemetry.appModel.info("Unmuted PR")
+        AppLog.appModel.info("Unmuted PR")
         saveState(); onChange?()
     }
 
@@ -106,9 +106,9 @@ final class AppModel {
         do {
             if on { try SMAppService.mainApp.register() }
             else  { try SMAppService.mainApp.unregister() }
-            AppTelemetry.appModel.info("Launch at login changed enabled=\(on, privacy: .public)")
+            AppLog.appModel.info("Launch at login changed enabled=\(on, privacy: .public)")
         } catch {
-            AppTelemetry.appModel.error("Launch at login change failed: \(String(describing: error), privacy: .private)")
+            AppLog.appModel.error("Launch at login change failed: \(String(describing: error), privacy: .private)")
             setStatus(.error("Login item failed: \(error.localizedDescription)"))
         }
         onChange?()
@@ -141,7 +141,7 @@ final class AppModel {
         let normalized = Set(repos) == Set(knownRepos) ? [] : repos.sorted()
         guard normalized != state.filters else { return }
         state.filters = normalized
-        AppTelemetry.appModel.info("Repo filters changed count=\(normalized.count, privacy: .public)")
+        AppLog.appModel.info("Repo filters changed count=\(normalized.count, privacy: .public)")
         saveState()
         kickRefresh()
     }
@@ -180,7 +180,7 @@ final class AppModel {
     }
 
     func start() {
-        AppTelemetry.appModel.info("App model starting")
+        AppLog.appModel.info("App model starting")
         notifier.onOpen = { url in NSWorkspace.shared.open(url) }
         // Wake / reconnect RESTART the loop (not a one-shot) — else periodic
         // polling dies after the first sleep.
@@ -194,7 +194,7 @@ final class AppModel {
 
     private func startLoop() {
         loopTask?.cancel()
-        AppTelemetry.appModel.debug("Refresh loop starting intervalSeconds=\(self.refreshIntervalSecs, privacy: .public)")
+        AppLog.appModel.debug("Refresh loop starting intervalSeconds=\(self.refreshIntervalSecs, privacy: .public)")
         loopTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -216,14 +216,14 @@ final class AppModel {
     func kickRefresh() { Task { await refreshNow() } }
 
     func refreshNow() async {
-        AppTelemetry.appModel.debug("Refresh requested status=\(self.status.telemetryName, privacy: .public)")
+        AppLog.appModel.debug("Refresh requested status=\(self.status.logName, privacy: .public)")
         if !tokenKnown {   // launch read was blocked (Keychain locked) — retry, don't re-read once known
             do {
                 let t = try tokenStore.read()
                 hasToken = t != nil; tokenKnown = true
                 if let t { await client.setToken(t) }   // deliver it: client was built token-less on a locked launch
             } catch {
-                AppTelemetry.appModel.error("Refresh blocked by Keychain read failure: \(String(describing: error), privacy: .private)")
+                AppLog.appModel.error("Refresh blocked by Keychain read failure: \(String(describing: error), privacy: .private)")
                 setStatus(.error("Keychain locked — unlock to refresh"))
                 return
             }
@@ -231,7 +231,7 @@ final class AppModel {
         guard hasToken else { setStatus(.signedOut); return }
         guard lifecycle.networkAvailable else { setStatus(.offline); return }
         guard !refreshing else {
-            AppTelemetry.appModel.debug("Refresh skipped because another refresh is active")
+            AppLog.appModel.debug("Refresh skipped because another refresh is active")
             return
         }     // single-flight: coalesce overlapping ticks
         refreshing = true
@@ -273,13 +273,13 @@ final class AppModel {
             seenRepos.formUnion(prs.map(\.repoFullName))   // remember repos even after they're filtered out
             state.lastUpdated = Date()
             saveState()
-            AppTelemetry.appModel.info(
+            AppLog.appModel.debug(
                 "Refresh succeeded total=\(prs.count, privacy: .public) notifications=\(deliveredEventCount, privacy: .public)"
             )
             setStatus(.loaded)
         } catch {
             guard myEpoch == epoch else { return }   // don't clobber status after a token change
-            AppTelemetry.appModel.error("Refresh failed: \(String(describing: error), privacy: .private)")
+            AppLog.appModel.error("Refresh failed: \(String(describing: error), privacy: .private)")
             switch error {
             case GitHubError.rateLimited(let until): setStatus(.rateLimited(until: until))
             case GitHubError.unauthorized:           setStatus(.signedOut)
@@ -309,7 +309,7 @@ final class AppModel {
         palette = t.palette
         UserDefaults.standard.set(t.rawValue, forKey: "theme")
         Theme.apply(t)
-        AppTelemetry.appModel.info("Theme changed")
+        AppLog.appModel.info("Theme changed")
         onChange?()   // re-render with the new palette
     }
 
@@ -319,22 +319,22 @@ final class AppModel {
     /// ponytail: rebuild client+engine in place if hot-switching ever matters.
     func setGitHubHost(_ host: String) {
         UserDefaults.standard.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "githubHost")
-        AppTelemetry.appModel.info("GitHub host setting changed")
+        AppLog.appModel.info("GitHub host setting changed")
     }
 
     func setRefreshInterval(_ secs: Int) {
         guard secs > 0, secs != refreshIntervalSecs else { return }
         refreshIntervalSecs = secs
         UserDefaults.standard.set(secs, forKey: "refreshIntervalSecs")
-        AppTelemetry.appModel.info("Refresh interval changed seconds=\(secs, privacy: .public)")
+        AppLog.appModel.info("Refresh interval changed seconds=\(secs, privacy: .public)")
         startLoop()   // restart so the new cadence takes effect immediately
         onChange?()
     }
 
     private func setStatus(_ s: AppStatus) {
         if status != s {
-            AppTelemetry.appModel.info(
-                "Status changed from=\(self.status.telemetryName, privacy: .public) to=\(s.telemetryName, privacy: .public)"
+            AppLog.appModel.debug(
+                "Status changed from=\(self.status.logName, privacy: .public) to=\(s.logName, privacy: .public)"
             )
         }
         status = s
@@ -351,7 +351,7 @@ final class AppModel {
         guard !trimmed.isEmpty else { return }
         do { try tokenStore.save(trimmed) }
         catch { setStatus(.error("Couldn't save token to Keychain.")); return }
-        AppTelemetry.appModel.info("PAT saved")
+        AppLog.appModel.info("PAT saved")
         tokenKnown = true; hasToken = true
         beginNewSession()
         Task { await client.setToken(trimmed); startLoop() }
@@ -363,7 +363,7 @@ final class AppModel {
                              + "set PRPeekClientID, or just Paste token.")); return
         }
         guard signInTask == nil else { return }   // re-entrancy guard: one sign-in at a time
-        AppTelemetry.appModel.info("Device sign-in started")
+        AppLog.appModel.info("Device sign-in started")
         let webBase = GitHubClient.webBase(forHost: UserDefaults.standard.string(forKey: "githubHost") ?? "")
         let flow = DeviceFlowAuth(transport: URLSessionTransport(), clientID: Self.clientID, webBaseURL: webBase)
         signInTask = Task { [weak self] in
@@ -385,28 +385,28 @@ final class AppModel {
                 })
                 do { try self.tokenStore.save(token) }
                 catch { self.setStatus(.error("Couldn't save token to Keychain.")); return }
-                AppTelemetry.appModel.info("Device sign-in completed")
+                AppLog.appModel.info("Device sign-in completed")
                 self.tokenKnown = true; self.hasToken = true
                 self.beginNewSession()
                 await self.client.setToken(token)
                 self.startLoop()
             } catch DeviceFlowAuth.DeviceFlowError.denied {
-                AppTelemetry.appModel.error("Device sign-in denied")
+                AppLog.appModel.error("Device sign-in denied")
                 self.setStatus(.error("Authorization denied."))
             } catch DeviceFlowAuth.DeviceFlowError.expired {
-                AppTelemetry.appModel.error("Device sign-in expired")
+                AppLog.appModel.error("Device sign-in expired")
                 self.setStatus(.error("Code expired — try Sign in again."))
             } catch is CancellationError {
                 // sign-out cancelled it; no status change
             } catch {
-                AppTelemetry.appModel.error("Device sign-in failed: \(String(describing: error), privacy: .private)")
+                AppLog.appModel.error("Device sign-in failed: \(String(describing: error), privacy: .private)")
                 self.setStatus(.error("Sign-in failed: \(error)"))
             }
         }
     }
 
     func signOut() {
-        AppTelemetry.appModel.info("Signing out")
+        AppLog.appModel.info("Signing out")
         signInTask?.cancel(); signInTask = nil
         beginNewSession()
         tokenKnown = true; hasToken = false
@@ -423,7 +423,7 @@ final class AppModel {
     /// suppress the next pass's notifications.
     private func beginNewSession() {
         epoch += 1
-        AppTelemetry.appModel.debug("Session epoch advanced")
+        AppLog.appModel.debug("Session epoch advanced")
         viewer = nil
         firstPass = true
         commentsCache.reset(); commitsCache.reset()   // account-scoped

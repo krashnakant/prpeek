@@ -17,13 +17,13 @@ final class LifecycleMonitor {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                AppTelemetry.lifecycle.info("System will sleep")
+                AppLog.lifecycle.info("System will sleep")
                 self?.onSleep?()
             }
         }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                AppTelemetry.lifecycle.info("System did wake")
+                AppLog.lifecycle.info("System did wake")
                 self?.onWake?()
             }
         }
@@ -33,7 +33,7 @@ final class LifecycleMonitor {
                 let was = self.networkAvailable
                 self.networkAvailable = (path.status == .satisfied)
                 if was != self.networkAvailable {
-                    AppTelemetry.lifecycle.info("Network availability changed available=\(self.networkAvailable, privacy: .public)")
+                    AppLog.lifecycle.info("Network availability changed available=\(self.networkAvailable, privacy: .public)")
                 }
                 if !was && self.networkAvailable { self.onNetworkSatisfied?() }
             }

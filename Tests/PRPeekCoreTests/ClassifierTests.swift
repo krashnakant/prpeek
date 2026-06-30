@@ -43,6 +43,24 @@ final class ClassifierTests: XCTestCase {
                                               signal: signal(reviewers: ["someoneelse"]), viewer: me))
     }
 
+    // waitReason maps each waiting branch to its reason, priority-ordered.
+    func test_waitReason_reviewer_beats_team() {
+        XCTAssertEqual(Classifier.waitReason(isDraft: false, author: "x", ci: .passing,
+            signal: signal(reviewers: ["me"], teams: ["org/reviewers"]), viewer: me), .reviewRequested)
+    }
+    func test_waitReason_team() {
+        XCTAssertEqual(Classifier.waitReason(isDraft: false, author: "x", ci: .passing,
+            signal: signal(teams: ["org/reviewers"]), viewer: me), .teamReview)
+    }
+    func test_waitReason_ci_failing() {
+        XCTAssertEqual(Classifier.waitReason(isDraft: false, author: "me", ci: .failing,
+            signal: signal(), viewer: me), .ciFailing)
+    }
+    func test_waitReason_nil_when_not_waiting() {
+        XCTAssertNil(Classifier.waitReason(isDraft: false, author: "x", ci: .passing,
+            signal: signal(), viewer: me))
+    }
+
     // CI rollup
     func test_ci_empty_is_none() {
         XCTAssertEqual(Classifier.ciState(from: []), .none)

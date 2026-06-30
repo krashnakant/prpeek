@@ -59,13 +59,19 @@ final class StatusController: NSObject {
             menu.addItem(action("Paste token…", #selector(pasteToken), symbol: "key.fill"))
         } else {
             // F3: "All" was a superset of the first two -> every PR shown up to 3×.
-            // Third section is the remainder so each PR appears once.
-            let needIDs = Set(model.needsMe.map(\.id))
-            let mineIDs = Set(model.mine.map(\.id))
-            let others = model.all.filter { !needIDs.contains($0.id) && !mineIDs.contains($0.id) }
+            // Remaining sections show the remainder so each PR appears once.
+            // Muted PRs live only in the Muted section (excluded from the rest).
+            let mutedIDs = Set(model.muted.map(\.id))
+            let needIDs = Set(model.needsMe.map(\.id))           // needsMe already excludes muted
+            let mine = model.mine.filter { !mutedIDs.contains($0.id) }
+            let mineIDs = Set(mine.map(\.id))
+            let others = model.all.filter {
+                !needIDs.contains($0.id) && !mineIDs.contains($0.id) && !mutedIDs.contains($0.id)
+            }
             section(menu, "Needs me", model.needsMe)
-            section(menu, "Mine", model.mine)
+            section(menu, "Mine", mine)
             section(menu, "Others", others)
+            if !model.muted.isEmpty { section(menu, "Muted", model.muted) }
             menu.addItem(.separator())
             menu.addItem(filterReposItem())
             menu.addItem(action("Refresh now", #selector(refresh), symbol: "arrow.clockwise"))
@@ -140,8 +146,11 @@ final class StatusController: NSObject {
             menu.addItem(empty)
         }
         for pr in prs.prefix(sectionCap) {
-            let i = NSMenuItem(title: "\(pr.repoFullName)#\(pr.number)  \(pr.title)",
+            // Surface WHY it needs me, inline + on hover (only set for waiting PRs).
+            let suffix = pr.waitReason.map { "  —  \($0.short)" } ?? ""
+            let i = NSMenuItem(title: "\(pr.repoFullName)#\(pr.number)  \(pr.title)\(suffix)",
                                action: nil, keyEquivalent: "")   // submenu = expand; "Open" lives inside it
+            i.toolTip = pr.waitReason?.long
             tint(i) { $0.text }
             i.image = ciImage(pr.ciState)   // semantic SF Symbol, not emoji (F2)
             let sub = PRSubmenu(pr: pr)
@@ -165,6 +174,39 @@ final class StatusController: NSObject {
     @objc private func refresh() { model.kickRefresh() }
     @objc private func signOut() { model.signOut() }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    // MARK: mute / snooze
+
+    /// "Snooze ▸ {1h, 4h, Until it updates}", or "Unmute" if already snoozed.
+    private func muteControl(for pr: PullRequest) -> NSMenuItem {
+        if model.isMuted(pr) {
+            let un = NSMenuItem(title: "Unmute", action: #selector(unmutePR(_:)), keyEquivalent: "")
+            un.target = self; un.representedObject = pr; un.image = Self.menuIcon("bell")
+            return un
+        }
+        let parent = NSMenuItem(title: "Snooze", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("moon.zzz")
+        let sub = NSMenu()
+        sub.addItem(snoozeRow("1 hour", 3600, pr))
+        sub.addItem(snoozeRow("4 hours", 14400, pr))
+        sub.addItem(snoozeRow("Until it updates", 0, pr))   // tag 0 = until-updated
+        parent.submenu = sub
+        return parent
+    }
+    private func snoozeRow(_ label: String, _ secs: Int, _ pr: PullRequest) -> NSMenuItem {
+        let i = NSMenuItem(title: label, action: #selector(snoozePR(_:)), keyEquivalent: "")
+        i.target = self; i.representedObject = pr; i.tag = secs
+        return i
+    }
+    @objc private func snoozePR(_ sender: NSMenuItem) {
+        guard let pr = sender.representedObject as? PullRequest else { return }
+        if sender.tag > 0 { model.mute(pr, for: TimeInterval(sender.tag)) }
+        else { model.muteUntilUpdated(pr) }
+    }
+    @objc private func unmutePR(_ sender: NSMenuItem) {
+        guard let pr = sender.representedObject as? PullRequest else { return }
+        model.unmute(pr)
+    }
 
     // MARK: repo filter
 
@@ -270,6 +312,7 @@ final class StatusController: NSObject {
         open.image = Self.menuIcon("arrow.up.right.square")
         open.representedObject = sub.pr.htmlURL
         sub.addItem(open)
+        sub.addItem(muteControl(for: sub.pr))
         sub.addItem(.separator())
 
         // Review comments
@@ -447,6 +490,24 @@ extension StatusController: NSMenuDelegate {
         if openMenus == 0, pendingRender {
             pendingRender = false
             render()
+        }
+    }
+}
+
+/// Human-readable "why it needs me" — inline suffix + hover tooltip.
+private extension WaitReason {
+    var short: String {
+        switch self {
+        case .reviewRequested: return "review requested"
+        case .teamReview:      return "team review"
+        case .ciFailing:       return "CI failing"
+        }
+    }
+    var long: String {
+        switch self {
+        case .reviewRequested: return "Review requested of you"
+        case .teamReview:      return "Your team's review was requested (CODEOWNERS)"
+        case .ciFailing:       return "Your PR — CI is failing"
         }
     }
 }

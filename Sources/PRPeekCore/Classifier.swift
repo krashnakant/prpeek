@@ -54,18 +54,25 @@ public struct ReviewSignal: Sendable, Equatable {
 }
 
 public enum Classifier {
-    /// "Waiting on me" iff NOT a draft AND one of:
-    ///  - you are a currently-requested reviewer, OR
-    ///  - you are a member of a currently-requested team, OR
-    ///  - you authored it AND CI is failing.
+    /// WHY a PR waits on me (nil = not waiting). NOT a draft AND, in priority:
+    ///  - you are a currently-requested reviewer            -> .reviewRequested
+    ///  - you are a member of a currently-requested team     -> .teamReview
+    ///  - you authored it AND CI is failing                  -> .ciFailing
+    public static func waitReason(isDraft: Bool, author: String,
+                                  ci: CIState, signal: ReviewSignal,
+                                  viewer: ViewerContext) -> WaitReason? {
+        if isDraft { return nil }
+        if signal.requestedReviewerLogins.contains(viewer.login) { return .reviewRequested }
+        if !viewer.teamKeys.isDisjoint(with: Set(signal.requestedTeamKeys)) { return .teamReview }
+        if author == viewer.login && ci == .failing { return .ciFailing }
+        return nil
+    }
+
+    /// Binary "waiting on me" — derived from `waitReason`.
     public static func waitingOnMe(isDraft: Bool, author: String,
                                    ci: CIState, signal: ReviewSignal,
                                    viewer: ViewerContext) -> Bool {
-        if isDraft { return false }
-        if signal.requestedReviewerLogins.contains(viewer.login) { return true }
-        if !viewer.teamKeys.isDisjoint(with: Set(signal.requestedTeamKeys)) { return true }
-        if author == viewer.login && ci == .failing { return true }
-        return false
+        waitReason(isDraft: isDraft, author: author, ci: ci, signal: signal, viewer: viewer) != nil
     }
 
     /// Roll up check-runs. Precise rule (plan): any failed run -> failing;

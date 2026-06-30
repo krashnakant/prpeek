@@ -50,12 +50,13 @@ public struct RefreshEngine: Sendable {
         let teamKeys = detail.requestedTeamSlugs.map { "\(owner)/\($0)" }
         let signal = ReviewSignal(requestedReviewerLogins: detail.requestedReviewers,
                                   requestedTeamKeys: teamKeys)
-        let waiting = Classifier.waitingOnMe(isDraft: detail.isDraft, author: pr.author,
-                                             ci: ci, signal: signal, viewer: viewer)
+        let reason = Classifier.waitReason(isDraft: detail.isDraft, author: pr.author,
+                                           ci: ci, signal: signal, viewer: viewer)
         var out = pr
         out.headSHA = detail.headSHA
         out.ciState = ci
-        out.waitingOnMe = waiting
+        out.waitReason = reason
+        out.waitingOnMe = reason != nil
         return out
     }
 }

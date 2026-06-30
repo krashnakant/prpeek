@@ -72,11 +72,39 @@ final class AppModel {
     private let commentsCache: PerPRLazyCache<[ReviewComment]>
     private let commitsCache: PerPRLazyCache<[Commit]>
 
-    // Views
-    var needsMe: [PullRequest] { state.pullRequests.filter(\.waitingOnMe) }
+    // Views. `needsMe` drives the red badge, so muted PRs drop out of it.
+    var needsMe: [PullRequest] { state.pullRequests.filter { $0.waitingOnMe && !isMuted($0) } }
     var mine: [PullRequest] { state.pullRequests.filter { $0.author == viewer?.login } }
     var all: [PullRequest] { state.pullRequests }
+    var muted: [PullRequest] { state.pullRequests.filter(isMuted) }
     var lastUpdated: Date? { state.lastUpdated }
+
+    // MARK: - Mute / snooze (local triage, no API)
+    func isMuted(_ pr: PullRequest) -> Bool { state.isMuted(pr, now: Date()) }
+    /// Snooze for a fixed window (e.g. 1h, 4h).
+    func mute(_ pr: PullRequest, for interval: TimeInterval) {
+        state.mutes[pr.id] = Mute(updatedAtSnapshot: pr.updatedAt, until: Date().addingTimeInterval(interval))
+        saveState(); onChange?()
+    }
+    /// Hide until the PR changes (its `updatedAt` moves).
+    func muteUntilUpdated(_ pr: PullRequest) {
+        state.mutes[pr.id] = Mute(updatedAtSnapshot: pr.updatedAt, until: nil)
+        saveState(); onChange?()
+    }
+    func unmute(_ pr: PullRequest) {
+        guard state.mutes.removeValue(forKey: pr.id) != nil else { return }
+        saveState(); onChange?()
+    }
+    /// Drop mutes for PRs that are gone or whose snooze has lapsed — keeps the
+    /// dictionary from growing without bound.
+    private func pruneMutes(against prs: [PullRequest]) {
+        let now = Date()
+        let byID = Dictionary(prs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        state.mutes = state.mutes.filter { id, m in
+            guard let pr = byID[id] else { return false }
+            return m.active(for: pr, now: now)
+        }
+    }
 
     // Repo filter (UI: "Filter repos" submenu). `state.filters` empty == all repos.
     var repoFilters: [String] { state.filters }
@@ -193,11 +221,16 @@ final class AppModel {
             guard myEpoch == epoch else { return }   // token changed -> discard stale (no leakage)
             if let v = fetchedViewer { viewer = v }
             if let login = viewer?.login, !firstPass {
-                notifier.deliver(NotificationPlanner.events(previous: previousPRs, current: prs, viewerLogin: login))
+                // Don't notify for snoozed PRs (the whole point of a snooze).
+                let mutedIDs = Set(prs.filter { state.isMuted($0, now: Date()) }.map(\.id))
+                let events = NotificationPlanner.events(previous: previousPRs, current: prs, viewerLogin: login)
+                    .filter { !mutedIDs.contains($0.prID) }
+                notifier.deliver(events)
             }
             firstPass = false
             previousPRs = prs
             state.pullRequests = prs
+            pruneMutes(against: prs)
             seenRepos.formUnion(prs.map(\.repoFullName))   // remember repos even after they're filtered out
             state.lastUpdated = Date()
             saveState()

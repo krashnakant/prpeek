@@ -10,13 +10,25 @@ func coloredSymbol(_ name: String, _ color: NSColor) -> NSImage {
     return img
 }
 
-/// CI rollup as a color SF Symbol (shape + color, never color-only). Palette
-/// tints for Catppuccin themes; nil falls back to system colors.
-func ciImage(_ s: CIState, palette: Palette?) -> NSImage {
+/// CI rollup color. Palette tints for Catppuccin themes; nil falls back to
+/// system colors. Shared so the chip tint and the glyph stay in sync.
+func ciColor(_ s: CIState, palette: Palette?) -> NSColor {
     switch s {
-    case .passing: return coloredSymbol("checkmark.circle.fill", palette?.green ?? .systemGreen)
-    case .failing: return coloredSymbol("xmark.octagon.fill", palette?.red ?? .systemRed)
-    case .pending: return coloredSymbol("clock.fill", palette?.yellow ?? .systemYellow)
-    case .none:    return coloredSymbol("minus.circle", palette?.subtext ?? .tertiaryLabelColor)
+    case .passing: return palette?.green ?? .systemGreen
+    case .failing: return palette?.red ?? .systemRed
+    case .pending: return palette?.yellow ?? .systemYellow
+    case .none:    return palette?.subtext ?? .tertiaryLabelColor
     }
+}
+
+/// CI rollup as a color SF Symbol (shape + color, never color-only).
+func ciImage(_ s: CIState, palette: Palette?) -> NSImage {
+    let name: String
+    switch s {
+    case .passing: name = "checkmark.circle.fill"
+    case .failing: name = "xmark.octagon.fill"
+    case .pending: name = "clock.fill"
+    case .none:    name = "minus.circle"
+    }
+    return coloredSymbol(name, ciColor(s, palette: palette))
 }

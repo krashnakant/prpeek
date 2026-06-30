@@ -64,14 +64,22 @@ final class DesktopPanel: NSObject {
         footerLabel.stringValue = footerText()
         rowsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
+        let p = model.palette
         guard model.status != .signedOut else {
-            rowsStack.addArrangedSubview(messageRow("Not signed in"))
+            rowsStack.addArrangedSubview(emptyState("person.crop.circle.badge.questionmark",
+                                                    p?.subtext ?? .secondaryLabelColor, "Not signed in"))
             return
         }
 
         let needs = model.needsMe
         if needs.isEmpty {
-            rowsStack.addArrangedSubview(messageRow("All clear"))
+            if model.status == .offline {
+                rowsStack.addArrangedSubview(emptyState("wifi.slash",
+                                                        p?.yellow ?? .systemYellow, "Offline — showing cached"))
+            } else {
+                rowsStack.addArrangedSubview(emptyState("checkmark.circle.fill",
+                                                        p?.green ?? .systemGreen, "All clear"))
+            }
         } else {
             for pr in needs.prefix(8) {
                 rowsStack.addArrangedSubview(prRow(pr))
@@ -92,12 +100,6 @@ final class DesktopPanel: NSObject {
     @objc private func closeClicked() {
         AppLog.desktopPanel.info("Desktop panel close clicked")
         hide()
-    }
-
-    @objc private func openPR(_ sender: PRRowButton) {
-        guard let url = sender.url else { return }
-        AppLog.desktopPanel.info("Desktop panel PR row opened")
-        NSWorkspace.shared.open(url)
     }
 
     // MARK: - Build
@@ -141,7 +143,7 @@ final class DesktopPanel: NSObject {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         rowsStack.orientation = .vertical
-        rowsStack.spacing = 6
+        rowsStack.spacing = 7
         rowsStack.translatesAutoresizingMaskIntoConstraints = false
 
         bg.addSubview(stack)
@@ -215,22 +217,10 @@ final class DesktopPanel: NSObject {
     }
 
     private func prRow(_ pr: PullRequest) -> NSView {
-        let row = PRRowButton()
-        row.url = pr.htmlURL
-        row.target = self
-        row.action = #selector(openPR(_:))
-        row.isBordered = false
-        row.bezelStyle = .regularSquare
-        row.alignment = .left
-        row.imagePosition = .imageLeft
-        row.image = ciImage(pr.ciState, palette: model.palette)
-        row.toolTip = "\(pr.repoFullName)#\(pr.number)\n\(pr.title)"
-        row.attributedTitle = rowTitle(pr)
-        row.setButtonType(.momentaryChange)
-        row.contentTintColor = model.palette?.text ?? .labelColor
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.heightAnchor.constraint(equalToConstant: 34).isActive = true
-        return row
+        PRCardView(pr: pr, palette: model.palette) {
+            AppLog.desktopPanel.info("Desktop panel PR row opened")
+            NSWorkspace.shared.open(pr.htmlURL)
+        }
     }
 
     private func messageRow(_ text: String) -> NSView {
@@ -241,6 +231,34 @@ final class DesktopPanel: NSObject {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.heightAnchor.constraint(equalToConstant: 34).isActive = true
         return label
+    }
+
+    /// Centered big-glyph + caption for the empty/offline/signed-out body.
+    private func emptyState(_ symbol: String, _ color: NSColor, _ text: String) -> NSView {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 26, weight: .regular)
+            .applying(.init(paletteColors: [color]))
+        let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(cfg) ?? NSImage())
+
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = model.palette?.subtext ?? .secondaryLabelColor
+
+        let stack = NSStackView(views: [icon, label])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.heightAnchor.constraint(equalToConstant: 200).isActive = true   // fills the body so it reads centered
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+        return container
     }
 
     private func iconButton(_ symbol: String, action: Selector, label: String) -> NSButton {
@@ -279,24 +297,6 @@ final class DesktopPanel: NSObject {
         return parts.joined(separator: "  -  ")
     }
 
-    private func rowTitle(_ pr: PullRequest) -> NSAttributedString {
-        let title = "\(pr.repoFullName)#\(pr.number)  \(pr.title)"
-        let p = model.palette
-        let color = p?.text ?? NSColor.labelColor
-        let sub = p?.subtext ?? NSColor.secondaryLabelColor
-        let out = NSMutableAttributedString(
-            string: title,
-            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: color]
-        )
-        if let reason = pr.waitReason {
-            out.append(NSAttributedString(
-                string: "  -  \(reason.panelLabel)",
-                attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: sub]
-            ))
-        }
-        return out
-    }
-
     private func applyTheme() {
         let p = model.palette
         titleLabel.textColor = p?.text ?? .labelColor
@@ -318,8 +318,128 @@ private final class DraggableHeaderView: NSView {
     }
 }
 
-private final class PRRowButton: NSButton {
-    var url: URL?
+/// A two-line PR card: a tinted CI chip, the PR title, and a meta line
+/// (repo#number + a "why it waits" pill). Clickable (opens the PR) with a hover
+/// highlight — a plain NSButton can't host this two-line layout cleanly.
+private final class PRCardView: NSView {
+    private let onOpen: () -> Void
+    private var hovered = false
+
+    init(pr: PullRequest, palette: Palette?, onOpen: @escaping () -> Void) {
+        self.onOpen = onOpen
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 9
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.05).cgColor
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 46).isActive = true
+
+        // CI chip: a tinted rounded box around the colored CI glyph.
+        let chip = NSView()
+        chip.wantsLayer = true
+        chip.layer?.cornerRadius = 7
+        chip.layer?.backgroundColor = ciColor(pr.ciState, palette: palette).withAlphaComponent(0.16).cgColor
+        chip.translatesAutoresizingMaskIntoConstraints = false
+        let glyph = NSImageView(image: ciImage(pr.ciState, palette: palette))
+        glyph.imageScaling = .scaleProportionallyDown
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(glyph)
+
+        let title = NSTextField(labelWithString: pr.title)
+        title.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        title.textColor = palette?.text ?? .labelColor
+        title.lineBreakMode = .byTruncatingTail
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        title.setAccessibilityElement(false)   // the card itself is the a11y button
+
+        let repo = NSTextField(labelWithString: "\(pr.repoFullName)#\(pr.number)")
+        repo.font = .systemFont(ofSize: 11)
+        repo.textColor = palette?.subtext ?? .secondaryLabelColor
+        repo.lineBreakMode = .byTruncatingTail
+        repo.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        repo.setAccessibilityElement(false)
+        repo.translatesAutoresizingMaskIntoConstraints = false
+
+        let meta = NSStackView(views: [repo])
+        meta.spacing = 6
+        meta.translatesAutoresizingMaskIntoConstraints = false
+        if let reason = pr.waitReason { meta.addArrangedSubview(Self.reasonPill(reason, palette: palette)) }
+
+        addSubview(chip); addSubview(title); addSubview(meta)
+        NSLayoutConstraint.activate([
+            chip.widthAnchor.constraint(equalToConstant: 22),
+            chip.heightAnchor.constraint(equalToConstant: 22),
+            chip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            chip.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            glyph.widthAnchor.constraint(equalToConstant: 13),
+            glyph.heightAnchor.constraint(equalToConstant: 13),
+            glyph.centerXAnchor.constraint(equalTo: chip.centerXAnchor),
+            glyph.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
+
+            title.leadingAnchor.constraint(equalTo: chip.trailingAnchor, constant: 10),
+            title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+
+            meta.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            meta.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
+            meta.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 3),
+        ])
+
+        toolTip = "\(pr.repoFullName)#\(pr.number)\n\(pr.title)"
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("\(pr.repoFullName) number \(pr.number), \(pr.title)")
+        updateBackground()
+    }
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    private func updateBackground() {
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(hovered ? 0.07 : 0.035).cgColor
+    }
+    override func mouseUp(with event: NSEvent) { onOpen() }
+    // Whole card is one click target — without this, the title/repo NSTextField
+    // labels return themselves from hitTest and swallow the click.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero,
+            options: [.activeInActiveApp, .mouseEnteredAndExited, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with e: NSEvent) { hovered = true; updateBackground() }
+    override func mouseExited(with e: NSEvent) { hovered = false; updateBackground() }
+
+    /// Small tinted "why it waits" pill. ponytail: review/team use system accent
+    /// colors — the Catppuccin Palette has no blue/mauve to map them to.
+    private static func reasonPill(_ reason: WaitReason, palette: Palette?) -> NSView {
+        let color: NSColor
+        switch reason {
+        case .reviewRequested: color = .systemPurple
+        case .teamReview:      color = .systemBlue
+        case .ciFailing:       color = palette?.red ?? .systemRed
+        }
+        let pill = NSView()
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 7
+        pill.layer?.backgroundColor = color.withAlphaComponent(0.16).cgColor
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.setContentHuggingPriority(.required, for: .horizontal)
+        let label = NSTextField(labelWithString: reason.panelLabel)
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = color
+        label.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(label)
+        NSLayoutConstraint.activate([
+            pill.heightAnchor.constraint(equalToConstant: 15),
+            label.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -7),
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+        ])
+        return pill
+    }
 }
 
 private extension WaitReason {

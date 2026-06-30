@@ -66,26 +66,25 @@ final class DesktopPanel: NSObject {
 
         let p = model.palette
         guard model.status != .signedOut else {
-            rowsStack.addArrangedSubview(emptyState("person.crop.circle.badge.questionmark",
-                                                    p?.subtext ?? .secondaryLabelColor, "Not signed in"))
+            addRow(emptyState("person.crop.circle.badge.questionmark",
+                              p?.subtext ?? .secondaryLabelColor, "Not signed in"))
             return
         }
 
         let needs = model.needsMe
         if needs.isEmpty {
             if model.status == .offline {
-                rowsStack.addArrangedSubview(emptyState("wifi.slash",
-                                                        p?.yellow ?? .systemYellow, "Offline — showing cached"))
+                addRow(emptyState("wifi.slash", p?.yellow ?? .systemYellow, "Offline — showing cached"))
             } else {
-                rowsStack.addArrangedSubview(emptyState("checkmark.circle.fill",
-                                                        p?.green ?? .systemGreen, "All clear"))
+                addRow(emptyState("checkmark.circle.fill", p?.green ?? .systemGreen, "All clear"))
             }
         } else {
-            for pr in needs.prefix(8) {
-                rowsStack.addArrangedSubview(prRow(pr))
+            let cap = 8
+            for pr in needs.prefix(cap) {
+                addRow(prRow(pr))
             }
-            if needs.count > 8 {
-                rowsStack.addArrangedSubview(messageRow("+\(needs.count - 8) more in the menu"))
+            if needs.count > cap {
+                addRow(messageRow("+\(needs.count - cap) more in the menu"))
             }
         }
     }
@@ -111,8 +110,13 @@ final class DesktopPanel: NSObject {
         w.backgroundColor = .clear
         w.hasShadow = true
         w.isMovableByWindowBackground = true
+        // Pin width to 340 — a borderless window otherwise grows to fit the
+        // longest untruncated title instead of truncating it.
+        w.contentMinSize = NSSize(width: 340, height: 200)
+        w.contentMaxSize = NSSize(width: 340, height: 4000)
         w.setFrameAutosaveName("PRPeekDesktopPanel")
         w.contentView = rootView()
+        w.setContentSize(NSSize(width: 340, height: 390))
         applyWindowPlacement(w)
         return w
     }
@@ -223,6 +227,14 @@ final class DesktopPanel: NSObject {
         }
     }
 
+    /// Add a row that fills the panel width — a vertical NSStackView otherwise
+    /// sizes each child to its content and centers it (rows scatter, long titles
+    /// never truncate).
+    private func addRow(_ view: NSView) {
+        rowsStack.addArrangedSubview(view)
+        view.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
+    }
+
     private func messageRow(_ text: String) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 12, weight: .medium)
@@ -331,7 +343,9 @@ private final class PRCardView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 9
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.05).cgColor
+        // labelColor-based so the card reads on light AND dark themes (white-only
+        // fill vanished on the System/Light appearance).
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
         translatesAutoresizingMaskIntoConstraints = false
         heightAnchor.constraint(equalToConstant: 46).isActive = true
 
@@ -395,7 +409,7 @@ private final class PRCardView: NSView {
     required init?(coder: NSCoder) { fatalError("not from a nib") }
 
     private func updateBackground() {
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(hovered ? 0.07 : 0.035).cgColor
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(hovered ? 0.11 : 0.06).cgColor
     }
     override func mouseUp(with event: NSEvent) { onOpen() }
     // Whole card is one click target — without this, the title/repo NSTextField

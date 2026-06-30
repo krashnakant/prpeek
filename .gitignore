@@ -3,3 +3,4 @@ PRPeek.app/
 PRPeek.dmg
 *.xcodeproj
 .DS_Store
+.gstack/

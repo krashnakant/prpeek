@@ -352,7 +352,11 @@ final class StatusController: NSObject {
     @objc private func pasteToken() {
         let alert = NSAlert()
         alert.messageText = "Paste a GitHub token"
-        alert.informativeText = "Fine-grained or classic PAT with repo + read:org access."
+        // Least privilege: a read-only fine-grained PAT is preferred over "Sign in"
+        // (device flow), whose classic `repo` scope also grants write. PRPeek only reads.
+        alert.informativeText = "Recommended: a fine-grained PAT (read-only) — "
+            + "Pull requests: Read, Contents: Read, and Org ▸ Members: Read (for team review). "
+            + "A classic PAT works too but needs repo + read:org (grants write)."
         // F4: a token is a secret — secure field (masked, no echo), focused so
         // the user can paste immediately.
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))

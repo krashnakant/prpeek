@@ -272,6 +272,11 @@ final class AppModel {
             guard let self else { return }
             defer { self.signInTask = nil }
             do {
+                // Classic device flow has no read-only private-repo scope: `repo`
+                // is the minimum that lets search see private PRs, but it also
+                // grants write. The least-privilege path is a read-only
+                // fine-grained PAT via "Paste token…" (see pasteToken copy).
+                // read:org powers /user/teams for team-review (CODEOWNERS) PRs.
                 let token = try await flow.authorize(scope: "repo read:org", onCode: { code in
                     Task { @MainActor in
                         NSPasteboard.general.clearContents()

@@ -1,0 +1,4 @@
+# Require owner review on the highest-privilege automation.
+# CI/CD and build scripts run with the release token (contents:write).
+/.github/   @krashnakant
+/Scripts/   @krashnakant

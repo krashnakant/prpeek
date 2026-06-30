@@ -4,8 +4,13 @@ A native macOS menubar app that watches your open GitHub pull requests — acros
 your personal repos **and** every org you're in — and tells you, at a glance,
 which ones are **waiting on you**.
 
-![CI](https://github.com/krashnakant/prpeek/actions/workflows/ci.yml/badge.svg)
-&nbsp;macOS 26 (Tahoe)+ · Swift 6 · MIT
+[![CI](https://github.com/krashnakant/prpeek/actions/workflows/ci.yml/badge.svg)](https://github.com/krashnakant/prpeek/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/krashnakant/prpeek?sort=semver)](https://github.com/krashnakant/prpeek/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/krashnakant/prpeek/total)](https://github.com/krashnakant/prpeek/releases)
+[![License](https://img.shields.io/github/license/krashnakant/prpeek)](LICENSE)
+&nbsp;macOS 26 (Tahoe)+ · Swift 6
+
+**[Website](https://krashnakant.github.io/prpeek/)** &nbsp;·&nbsp; **[Download](https://github.com/krashnakant/prpeek/releases/latest)**
 
 PRs scatter across tabs and orgs. PRPeek puts a single color-coded count in your
 menu bar: red with a number when something needs your review or your CI is red,

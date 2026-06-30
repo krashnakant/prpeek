@@ -101,13 +101,44 @@ Requires macOS 26 (Tahoe)+ and Xcode 26+.
 ## Usage
 
 Click the menubar icon → sign in:
-- **Paste token…** — a GitHub PAT (classic with `repo` + `read:org`, or a
-  fine-grained token with PR read + org read). Works immediately.
+- **Paste token… (recommended)** — a read-only **fine-grained PAT** is the
+  least-privilege option: Repository ▸ Pull requests **Read**, Contents **Read**,
+  and Organization ▸ Members **Read** (for team-review/CODEOWNERS PRs). A classic
+  PAT works too but needs `repo` + `read:org` and grants **write** PRPeek never
+  uses. Works immediately.
 - **Sign in with GitHub** — register an OAuth App (Settings ▸ Developer settings,
   enable Device Flow), then build with `PRPEEK_CLIENT_ID=<id>`. Device flow copies
-  a code and opens the pre-filled GitHub page.
+  a code and opens the pre-filled GitHub page. Note: classic device flow has no
+  read-only private-repo scope, so it requests write-capable `repo` — prefer the
+  fine-grained PAT above if that matters to you.
 
 The badge turns red with your "needs me" count; click any PR to open it.
+
+## Security
+
+PRPeek is a read-only client. It talks only to GitHub, holds one credential, and
+ships no telemetry.
+
+- **Token at rest** — stored in the macOS **Keychain** (generic password), never
+  in the on-disk cache. The cache (`~/Library/Application Support/PRPeek/`) holds
+  only PR metadata (titles, repo, author, CI state).
+- **Least privilege** — prefer a read-only fine-grained PAT (see [Usage](#usage)).
+  The app makes no write calls; granting write is unnecessary.
+- **Transport** — HTTPS only to `api.github.com` / `github.com`, system TLS
+  verification on (no cert pinning bypass). All hosts are hardcoded.
+- **Account isolation** — the ETag cache flushes on token change and an epoch
+  guard discards in-flight refreshes after sign-out; no data leaks across accounts.
+- **No third-party dependencies** — zero SwiftPM deps, so no transitive CVE or
+  install-script supply-chain surface.
+- **Supply chain (CI/CD)** — all GitHub Actions are pinned to commit SHAs;
+  `.github/CODEOWNERS` gates changes to workflows and build scripts. Releases run
+  with `contents: write` only on tag push.
+
+Distribution caveat: release DMGs are ad-hoc signed, **not notarized** — verify
+you trust the source. Build from source if you prefer.
+
+**Reporting:** found a vulnerability? Open a [private security advisory](https://github.com/krashnakant/prpeek/security/advisories/new)
+rather than a public issue.
 
 ## Roadmap
 

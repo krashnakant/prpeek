@@ -9,6 +9,7 @@ final class StatusController: NSObject {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let model: AppModel
     private let panel: DesktopPanel
+    private let search: SearchWindow
     private let sectionCap = 15
     /// PR id -> its live submenu(s), rebuilt each render. A self-authored failing
     /// PR shows in both "Needs me" and "Mine", so one id can have two submenus;
@@ -23,6 +24,7 @@ final class StatusController: NSObject {
     init(model: AppModel) {
         self.model = model
         self.panel = DesktopPanel(model: model)
+        self.search = SearchWindow(model: model)
         super.init()
         model.onChange = { [weak self] in self?.render() }
         model.onSubmenuReload = { [weak self] id in
@@ -33,6 +35,7 @@ final class StatusController: NSObject {
 
     private func render() {
         panel.refresh()   // desktop widget updates even while the menu is open
+        search.refresh()  // keep the search list live if its window is open
 
         // Don't rebuild while the menu is open — it would close a sticky toggle
         // session. Flush on close (menuDidClose).
@@ -73,6 +76,7 @@ final class StatusController: NSObject {
             section(menu, "Others", others)
             if !model.muted.isEmpty { section(menu, "Muted", model.muted) }
             menu.addItem(.separator())
+            menu.addItem(action("Search PRs…", #selector(openSearch), key: "f", symbol: "magnifyingglass"))
             menu.addItem(filterReposItem())
             menu.addItem(action("Refresh now", #selector(refresh), symbol: "arrow.clockwise"))
             menu.addItem(action("Sign out", #selector(signOut), symbol: "rectangle.portrait.and.arrow.right"))
@@ -176,6 +180,7 @@ final class StatusController: NSObject {
     }
     @objc private func openAll() { NSWorkspace.shared.open(URL(string: "https://github.com/pulls")!) }
     @objc private func refresh() { model.kickRefresh() }
+    @objc private func openSearch() { search.show() }
     @objc private func signOut() { model.signOut() }
     @objc private func quit() { NSApp.terminate(nil) }
 

@@ -18,18 +18,25 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     private var notificationsSupported: Bool { Bundle.main.bundleIdentifier != nil }
 
     func requestAuthorizationIfNeeded() {
-        guard notificationsSupported else { return }
+        guard notificationsSupported else {
+            AppTelemetry.notifications.info("Notifications unsupported without app bundle identifier")
+            return
+        }
         guard !requested else { return }
         requested = true
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
-            Task { @MainActor in self?.authorized = granted }
+            Task { @MainActor in
+                self?.authorized = granted
+                AppTelemetry.notifications.info("Notification authorization resolved granted=\(granted, privacy: .public)")
+            }
         }
     }
 
     func deliver(_ events: [NotificationEvent]) {
         guard notificationsSupported, authorized, !events.isEmpty else { return } // denied/no-bundle -> silent degrade
+        AppTelemetry.notifications.info("Delivering notifications count=\(events.count, privacy: .public)")
         let center = UNUserNotificationCenter.current()
         for e in events {
             let content = UNMutableNotificationContent()
@@ -47,7 +54,10 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
                                             didReceive response: UNNotificationResponse) async {
         guard let s = response.notification.request.content.userInfo["url"] as? String,
               let url = URL(string: s) else { return }
-        await MainActor.run { self.onOpen?(url) }
+        await MainActor.run {
+            AppTelemetry.notifications.info("Notification opened")
+            self.onOpen?(url)
+        }
     }
 
     // Show banners even while the app is frontmost.

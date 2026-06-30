@@ -297,7 +297,9 @@ final class StatusController: NSObject {
 
     private func commitItem(_ c: Commit) -> NSMenuItem {
         let title = "\(c.message.prefix(56))  ·  \(c.shortSHA)  ·  \(c.author) \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
-        return linkRow(title: title, image: ciImage(c.ciState), url: c.htmlURL)   // per-commit check-runs
+        // Hover summary: full (untruncated) subject + metadata.
+        let tip = "\(c.message)\n\(c.shortSHA) · \(c.author) · \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
+        return linkRow(title: title, image: ciImage(c.ciState), url: c.htmlURL, toolTip: tip)   // per-commit check-runs
     }
 
     private static let age: RelativeDateTimeFormatter = {
@@ -307,16 +309,21 @@ final class StatusController: NSObject {
     private func commentItem(_ c: ReviewComment) -> NSMenuItem {
         let snippet = c.body.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         let loc = c.location.map { " (\($0))" } ?? ""
-        return linkRow(title: "\(c.author): \(snippet.prefix(64))\(loc)", image: verdictImage(c.verdict), url: c.htmlURL)
+        // Hover summary: author + verdict + location, then the full comment body.
+        let tip = "\(c.author) · \(c.verdict.rawValue)\(loc)\n\n\(c.body)"
+        return linkRow(title: "\(c.author): \(snippet.prefix(64))\(loc)", image: verdictImage(c.verdict),
+                       url: c.htmlURL, toolTip: tip)
     }
 
     /// A clickable, optionally-themed menu row that opens `url` in the browser.
-    private func linkRow(title: String, image: NSImage?, url: URL?) -> NSMenuItem {
+    /// `toolTip` shows the full summary on hover (titles are truncated).
+    private func linkRow(title: String, image: NSImage?, url: URL?, toolTip: String? = nil) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: url != nil ? #selector(openPR(_:)) : nil, keyEquivalent: "")
         i.target = self
         i.representedObject = url
         tint(i) { $0.text }
         i.image = image
+        i.toolTip = toolTip
         return i
     }
 

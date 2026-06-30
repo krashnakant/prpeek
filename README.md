@@ -20,17 +20,31 @@ calm when you're at inbox zero. No browser tab-hopping.
 - **Glanceable menubar badge** — a red pill with the count of PRs waiting on you;
   monochrome count when none; checkmark at inbox zero.
 - **Three views** — `Needs me` (review requested of you, or your PR with failing
-  CI), `Mine` (you authored), `Others` (involved but neither).
+  CI), `Mine` (you authored), `Others` (involved but neither), plus a `Muted`
+  section for snoozed PRs.
 - **Precise "waiting on me"** — excludes drafts, honors live review requests
-  (incl. team requests via your team memberships), and your own PRs with a failed
-  required/any check. The badge doesn't lie.
+  (incl. team requests via your team memberships and CODEOWNERS), and your own
+  PRs with a failed required/any check. The badge doesn't lie.
+- **Shows *why*** — each "Needs me" row says the reason inline (review requested,
+  team review, CI failing) and on hover, so the badge isn't just a binary signal.
+- **Snooze / mute** — hush a noisy PR for 1h, 4h, or until it next changes. Muted
+  PRs drop out of the badge and notifications; a "hide until updated" snooze
+  re-notifies once when the PR actually moves.
+- **PR detail on expand** — each PR's submenu lists its commits (with per-commit
+  CI) and review comments; hover any row for the full summary.
+- **Search everything** — a keyboard-first window (⌘F) over *all* loaded PRs,
+  filtered live by repo / number / title / author. ↑↓ to move, Enter to open.
 - **Native notifications** — fires only on the transition (review requested, your
   CI fails), deduped, no storm on launch. Click → opens the PR.
+- **Make it yours** — themes (System / Light / Dark / Catppuccin), a configurable
+  refresh interval, an optional always-on-desktop panel, and launch-at-login.
+- **Works with GitHub Enterprise** — point it at your GHES host; the rest is the same.
 - **Two ways to sign in** — paste a PAT, or OAuth device flow (no client secret).
   Token stored in the Keychain.
-- **Cheap polling** — one GitHub Search query (`involves:@me`) covers all repos
-  with zero enumeration; ETag conditional requests make idle polls nearly free;
-  a concurrency cap keeps the per-PR checks fan-out under the secondary rate limit.
+- **Cheap polling** — GitHub Search (`involves:@me`, plus `team-review-requested`
+  for CODEOWNERS team PRs) covers all repos with zero enumeration; ETag
+  conditional requests make idle polls nearly free; a concurrency cap keeps the
+  per-PR checks fan-out under the secondary rate limit.
 - **Laptop-aware** — pauses on sleep, refreshes once on wake (no backlog burst),
   holds when offline and shows cached PRs, backs off when rate-limited.
 - **Instant launch** — last PRs restored from an atomic JSON cache before the
@@ -44,22 +58,22 @@ Logic lives in a fully-tested `PRPeekCore` library; the AppKit shell is thin.
  GitHub REST API
         ▲  │ ETag / 304 (idle polls ~free)
         │  ▼
- GitHubClient (actor) ──► SearchService  is:pr is:open involves:@me
-   token in Keychain          │
+ GitHubClient (actor) ──► SearchService  involves:@me + team-review-requested
+   token in Keychain          │          (host configurable: github.com / GHES)
         ▲                     ▼
         │            RefreshEngine ──► per-PR enrich (detail + check-runs)
         │              (one coalesced     │  concurrency-capped
         │               pass)             ▼
-        │                         Classifier → waiting-on-me + CI rollup
+        │                         Classifier → wait reason + CI rollup
         │                                 │
-   JSONStore (atomic cache) ◄── persist ──┤
-                                          ▼
-                       @MainActor AppModel  ──►  NotificationPlanner (edge-fire)
-                            │  (state + epoch guard + backoff)
-              ┌─────────────┼──────────────┐
-              ▼             ▼               ▼
-        menubar badge   dropdown menu   macOS notifications
-        (NSImage)       (3 sections)
+   JSONStore (atomic cache, ◄── persist ──┤
+    incl. snooze state)                   ▼
+                       @MainActor AppModel  ──►  NotificationPlanner (edge-fire,
+                            │  (state + epoch guard + backoff)   muted-aware)
+              ┌─────────────┼───────┬───────────────┐
+              ▼             ▼       ▼               ▼
+        menubar badge   dropdown  search window  macOS notifications
+        (NSImage)       (sections)  (⌘F, all PRs)
 
  LifecycleMonitor: NSWorkspace sleep/wake + NWPathMonitor → drives the poll loop
 ```
@@ -112,7 +126,17 @@ Click the menubar icon → sign in:
   read-only private-repo scope, so it requests write-capable `repo` — prefer the
   fine-grained PAT above if that matters to you.
 
-The badge turns red with your "needs me" count; click any PR to open it.
+The badge turns red with your "needs me" count; click any PR to open it. Expand
+a PR for its commits + review comments.
+
+**Day-to-day:**
+- **Search PRs… (⌘F)** — find any PR across everything loaded; type to filter,
+  ↑↓ to move, Enter to open.
+- **Snooze** — in a PR's submenu, mute it for 1h / 4h / until it next updates.
+  Unmute from the same place or the `Muted` section.
+- **Settings** (menu) — `Theme`, `Refresh interval`, `Launch at login`,
+  `Desktop panel`, `Filter repos`, and `GitHub host…` for GitHub Enterprise
+  (enter your GHES hostname, then restart; use a fine-grained PAT to sign in).
 
 ## Security
 
@@ -142,10 +166,11 @@ rather than a public issue.
 
 ## Roadmap
 
-- Approve / comment actions from the menu (with confirm) — v1.1
+- Approve / comment actions from the menu — gated behind an explicit opt-in
+  "reviewer mode" token, so the default stays read-only — v1.1
 - Pinned-repo `[All]` coverage for repos you're not involved in — v1.1
 - Notarized DMG (Developer ID) for friction-free install
-- Live filter/search box in the dropdown
+- Auto-update (Sparkle), paired with the notarized DMG
 
 ## Contributing
 

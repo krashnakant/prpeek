@@ -142,19 +142,23 @@ public enum DevicePollResult: Sendable, Equatable {
 /// Device flow against github.com (NOT api.github.com). No client secret needed —
 /// device flow is designed for clients that can't keep one.
 public struct DeviceFlowAuth: Sendable {
-    public static let codeURL = URL(string: "https://github.com/login/device/code")!
-    public static let tokenURL = URL(string: "https://github.com/login/oauth/access_token")!
     static let grantType = "urn:ietf:params:oauth:grant-type:device_code"
 
     let transport: Transport
     let clientID: String
-    public init(transport: Transport, clientID: String) {
+    let codeURL: URL
+    let tokenURL: URL
+    /// `webBaseURL` is github.com for the public cloud, or the GHES host.
+    public init(transport: Transport, clientID: String,
+                webBaseURL: URL = URL(string: "https://github.com")!) {
         self.transport = transport; self.clientID = clientID
+        self.codeURL = webBaseURL.appending(path: "login/device/code")
+        self.tokenURL = webBaseURL.appending(path: "login/oauth/access_token")
     }
 
     public func requestDeviceCode(scope: String) async throws -> DeviceCodeResponse {
         let body = form(["client_id": clientID, "scope": scope])
-        let data = try await postJSON(Self.codeURL, body: body)
+        let data = try await postJSON(codeURL, body: body)
         return try decode(DeviceCodeResponse.self, data)
     }
 
@@ -193,7 +197,7 @@ public struct DeviceFlowAuth: Sendable {
         let body = form(["client_id": clientID,
                          "device_code": deviceCode,
                          "grant_type": Self.grantType])
-        let data = try await postJSON(Self.tokenURL, body: body)
+        let data = try await postJSON(tokenURL, body: body)
         let resp = try decode(TokenResponse.self, data)
         if let token = resp.accessToken { return .token(token) }
         switch resp.error {

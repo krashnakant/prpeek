@@ -78,11 +78,15 @@ final class StatusController: NSObject {
             menu.addItem(action("Sign out", #selector(signOut), symbol: "rectangle.portrait.and.arrow.right"))
         }
         menu.addItem(.separator())
+        menu.addItem(toggle("Launch at login", isOn: { [weak self] in self?.model.launchAtLogin ?? false }) {
+            [weak self] in guard let self else { return }; self.model.setLaunchAtLogin(!self.model.launchAtLogin)
+        })
         menu.addItem(toggle("Desktop panel", isOn: { [weak self] in self?.panel.isVisible ?? false }) {
             [weak self] in self?.panel.toggle()
         })
         menu.addItem(intervalItem())
         menu.addItem(themeItem())
+        menu.addItem(action("GitHub host…", #selector(setHost), symbol: "server.rack"))
         menu.addItem(action("Quit PRPeek", #selector(quit), key: "q", symbol: "power"))
 
         // NSApp.appearance alone doesn't repaint a status-item menu — set it on
@@ -206,6 +210,27 @@ final class StatusController: NSObject {
     @objc private func unmutePR(_ sender: NSMenuItem) {
         guard let pr = sender.representedObject as? PullRequest else { return }
         model.unmute(pr)
+    }
+
+    // MARK: GitHub Enterprise host
+    @objc private func setHost() {
+        let alert = NSAlert()
+        alert.messageText = "GitHub Enterprise host"
+        alert.informativeText = "Hostname only, e.g. github.acme.com. Leave blank for github.com. "
+            + "Use a fine-grained PAT via Paste token for GHES. Restart PRPeek to apply."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = model.githubHost
+        field.placeholderString = "github.com"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        model.setGitHubHost(field.stringValue)
+        let note = NSAlert()
+        note.messageText = "Restart required"
+        note.informativeText = "Quit and reopen PRPeek for the host change to take effect."
+        note.runModal()
     }
 
     // MARK: repo filter

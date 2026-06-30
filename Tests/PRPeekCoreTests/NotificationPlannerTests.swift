@@ -45,4 +45,24 @@ final class NotificationPlannerTests: XCTestCase {
         let events = NotificationPlanner.events(previous: [], current: curr, viewerLogin: "me")
         XCTAssertEqual(events.count, 1)
     }
+
+    // A "hide until updated" mute that cleared (PR changed) re-notifies once.
+    private func waitingPR(updatedAt: Date) -> PullRequest {
+        var p = pr("E", author: "other", waiting: true)
+        p.waitReason = .reviewRequested
+        return PullRequest(id: p.id, number: p.number, repoFullName: p.repoFullName, title: p.title,
+                           htmlURL: p.htmlURL, isDraft: false, author: p.author,
+                           ciState: .none, waitingOnMe: true, waitReason: .reviewRequested, updatedAt: updatedAt)
+    }
+    func test_resurfaced_mute_fires_when_pr_updates() {
+        let snap = Date(timeIntervalSince1970: 100)
+        let mutes = ["E": Mute(updatedAtSnapshot: snap, until: nil)]
+        // PR unchanged -> still muted -> nothing.
+        XCTAssertTrue(NotificationPlanner.resurfacedMutes(
+            current: [waitingPR(updatedAt: snap)], mutes: mutes, now: snap).isEmpty)
+        // PR updated past the snapshot -> mute cleared -> one event.
+        let out = NotificationPlanner.resurfacedMutes(
+            current: [waitingPR(updatedAt: snap.addingTimeInterval(1))], mutes: mutes, now: snap)
+        XCTAssertEqual(out.map(\.kind), [.reviewRequested])
+    }
 }

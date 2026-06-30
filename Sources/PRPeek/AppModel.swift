@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import PRPeekCore
 
 enum AppStatus: Equatable {
@@ -95,6 +96,18 @@ final class AppModel {
         guard state.mutes.removeValue(forKey: pr.id) != nil else { return }
         saveState(); onChange?()
     }
+
+    // MARK: - Launch at login (SMAppService — no helper bundle needed)
+    var launchAtLogin: Bool { SMAppService.mainApp.status == .enabled }
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() }
+            else  { try SMAppService.mainApp.unregister() }
+        } catch {
+            setStatus(.error("Login item failed: \(error.localizedDescription)"))
+        }
+        onChange?()
+    }
     /// Drop mutes for PRs that are gone or whose snooze has lapsed — keeps the
     /// dictionary from growing without bound.
     private func pruneMutes(against prs: [PullRequest]) {
@@ -145,7 +158,9 @@ final class AppModel {
         catch { token = nil; readOK = false }   // Keychain locked at launch
         self.tokenKnown = readOK
         self.hasToken = readOK && token != nil
-        self.client = GitHubClient(transport: URLSessionTransport(), token: token)
+        // GitHub Enterprise Server: blank host == github.com (api.github.com).
+        let apiBase = GitHubClient.apiBase(forHost: UserDefaults.standard.string(forKey: "githubHost") ?? "")
+        self.client = GitHubClient(transport: URLSessionTransport(), token: token, baseURL: apiBase)
         self.engine = RefreshEngine(client: client)
         let client = self.client   // capture the actor, not self, for the @Sendable fetch closures
         self.commentsCache = PerPRLazyCache { o, r, n in
@@ -221,10 +236,16 @@ final class AppModel {
             guard myEpoch == epoch else { return }   // token changed -> discard stale (no leakage)
             if let v = fetchedViewer { viewer = v }
             if let login = viewer?.login, !firstPass {
-                // Don't notify for snoozed PRs (the whole point of a snooze).
-                let mutedIDs = Set(prs.filter { state.isMuted($0, now: Date()) }.map(\.id))
-                let events = NotificationPlanner.events(previous: previousPRs, current: prs, viewerLogin: login)
+                let now = Date()
+                // Don't notify for still-snoozed PRs (the whole point of a snooze)...
+                let mutedIDs = Set(prs.filter { state.isMuted($0, now: now) }.map(\.id))
+                var events = NotificationPlanner.events(previous: previousPRs, current: prs, viewerLogin: login)
                     .filter { !mutedIDs.contains($0.prID) }
+                // ...but a "hide until updated" mute that just cleared re-notifies once.
+                // Read mutes BEFORE pruneMutes drops the cleared entry.
+                var seen = Set(events.map(\.id))
+                for e in NotificationPlanner.resurfacedMutes(current: prs, mutes: state.mutes, now: now)
+                where !seen.contains(e.id) { seen.insert(e.id); events.append(e) }
                 notifier.deliver(events)
             }
             firstPass = false
@@ -269,6 +290,14 @@ final class AppModel {
         onChange?()   // re-render with the new palette
     }
 
+    var githubHost: String { UserDefaults.standard.string(forKey: "githubHost") ?? "" }
+    /// Persist the GHES host. The client is built once at launch (and captured by
+    /// the lazy caches), so a host change needs a relaunch — the UI says so.
+    /// ponytail: rebuild client+engine in place if hot-switching ever matters.
+    func setGitHubHost(_ host: String) {
+        UserDefaults.standard.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "githubHost")
+    }
+
     func setRefreshInterval(_ secs: Int) {
         guard secs > 0, secs != refreshIntervalSecs else { return }
         refreshIntervalSecs = secs
@@ -300,7 +329,8 @@ final class AppModel {
                              + "set PRPeekClientID, or just Paste token.")); return
         }
         guard signInTask == nil else { return }   // re-entrancy guard: one sign-in at a time
-        let flow = DeviceFlowAuth(transport: URLSessionTransport(), clientID: Self.clientID)
+        let webBase = GitHubClient.webBase(forHost: UserDefaults.standard.string(forKey: "githubHost") ?? "")
+        let flow = DeviceFlowAuth(transport: URLSessionTransport(), clientID: Self.clientID, webBaseURL: webBase)
         signInTask = Task { [weak self] in
             guard let self else { return }
             defer { self.signInTask = nil }

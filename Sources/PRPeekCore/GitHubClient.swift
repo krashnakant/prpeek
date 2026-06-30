@@ -5,8 +5,22 @@ import Foundation
 /// off the main thread. Returns Sendable DTOs only — nothing crosses back to the
 /// UI except plain Codable values.
 public actor GitHubClient {
-    public static let baseURL = URL(string: "https://api.github.com")!
+    public static let dotComBase = URL(string: "https://api.github.com")!
 
+    /// REST API base. github.com -> api.github.com; GHES -> https://HOST/api/v3.
+    public static func apiBase(forHost host: String) -> URL {
+        let h = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if h.isEmpty || h == "github.com" || h == "api.github.com" { return dotComBase }
+        return URL(string: "https://\(h)/api/v3") ?? dotComBase
+    }
+    /// Web base (device-flow + browser links). github.com -> github.com; GHES -> HOST.
+    public static func webBase(forHost host: String) -> URL {
+        let h = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if h.isEmpty || h == "github.com" || h == "api.github.com" { return URL(string: "https://github.com")! }
+        return URL(string: "https://\(h)") ?? URL(string: "https://github.com")!
+    }
+
+    public let baseURL: URL
     private let transport: Transport
     private var token: String?
     /// url string -> (etag, last 200 body). Backs conditional requests; 304 ->
@@ -16,9 +30,11 @@ public actor GitHubClient {
     private let etagCap = 600                      // cap: check-runs keyed by head SHA grow forever otherwise
 
     public init(transport: Transport, token: String? = nil,
+                baseURL: URL = GitHubClient.dotComBase,
                 etagCache: [String: (etag: String, data: Data)] = [:]) {
         self.transport = transport
         self.token = token
+        self.baseURL = baseURL
         self.etagCache = etagCache
         self.etagOrder = Array(etagCache.keys)
     }
@@ -48,7 +64,7 @@ public actor GitHubClient {
     /// Decode a single resource (e.g. GET /user).
     public func getValue<T: Decodable & Sendable>(_ type: T.Type = T.self,
                                                   path: String) async throws -> T {
-        let url = Self.baseURL.appending(path: path)
+        let url = baseURL.appending(path: path)
         let (data, _) = try await rawGet(url: url)
         return try decode(T.self, from: data, url: url)
     }
@@ -57,7 +73,7 @@ public actor GitHubClient {
     /// `Link: rel="next"` to the end. Each page is conditional (per-URL ETag).
     public func getCollection<T: Decodable & Sendable>(_ type: T.Type = T.self,
                                                        path: String) async throws -> [T] {
-        var url: URL? = Self.baseURL.appending(path: path)
+        var url: URL? = baseURL.appending(path: path)
         var out: [T] = []
         while let current = url {
             let (data, http) = try await rawGet(url: current)
@@ -73,7 +89,7 @@ public actor GitHubClient {
     public func getSearchItems<Item: Decodable & Sendable>(_ type: Item.Type = Item.self,
                                                            pathAndQuery: String,
                                                            maxItems: Int = 1000) async throws -> [Item] {
-        var url: URL? = URL(string: Self.baseURL.absoluteString + pathAndQuery)
+        var url: URL? = URL(string: baseURL.absoluteString + pathAndQuery)
         var out: [Item] = []
         while let current = url, out.count < maxItems {
             let (data, http) = try await rawGet(url: current)

@@ -90,8 +90,11 @@ public extension GitHubClient {
     }
 
     func ciState(owner: String, repo: String, sha: String) async throws -> CIState {
-        let r: CheckRunsResponse = try await getValue(path: "/repos/\(owner)/\(repo)/commits/\(sha)/check-runs")
-        return Classifier.ciState(from: r.checkRuns)
+        // Paginated: check-runs default to 30/page — a failing run past page 1
+        // must still count, or big repos show green on a red commit.
+        let pages: [CheckRunsResponse] = try await getPages(
+            pathAndQuery: "/repos/\(owner)/\(repo)/commits/\(sha)/check-runs?per_page=100")
+        return Classifier.ciState(from: pages.flatMap(\.checkRuns))
     }
 
     /// GET /user/teams -> {"org/slug"} for team-membership classification.

@@ -8,9 +8,10 @@ import PRPeekCore
 final class PerPRLazyCache<Value> {
     private var values: [String: Value] = [:]
     private var loading: Set<String> = []
-    private let fetch: @Sendable (_ owner: String, _ repo: String, _ number: Int) async -> Value
+    /// nil from fetch = failure — NOT cached, so the next `load` retries.
+    private let fetch: @Sendable (_ owner: String, _ repo: String, _ number: Int) async -> Value?
 
-    init(fetch: @escaping @Sendable (String, String, Int) async -> Value) { self.fetch = fetch }
+    init(fetch: @escaping @Sendable (String, String, Int) async -> Value?) { self.fetch = fetch }
 
     /// nil = not loaded yet; non-nil = loaded (may be empty).
     func value(for pr: PullRequest) -> Value? { values[pr.id] }
@@ -27,8 +28,11 @@ final class PerPRLazyCache<Value> {
         Task { [weak self] in
             guard let self else { return }
             let v = await self.fetch(owner, repo, number)
-            guard started == epoch() else { return }   // account switched mid-flight
+            // Account switched mid-flight: reset() already cleared `loading`; don't
+            // touch it here or we'd break a new same-id load's in-flight dedup.
+            guard started == epoch() else { return }
             self.loading.remove(id)
+            guard let v else { onReload(id); return }   // fetch failed: no cache, retry next open
             self.values[id] = v
             onReload(id)
         }

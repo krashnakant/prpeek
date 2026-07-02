@@ -45,7 +45,7 @@ final class MenuToggleView: NSView {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds,
-            options: [.activeInActiveApp, .mouseEnteredAndExited], owner: self))
+            options: [.activeInActiveApp, .mouseEnteredAndExited, .inVisibleRect], owner: self))
     }
     override func mouseEntered(with e: NSEvent) { hovered = true; needsDisplay = true }
     override func mouseExited(with e: NSEvent) { hovered = false; needsDisplay = true }

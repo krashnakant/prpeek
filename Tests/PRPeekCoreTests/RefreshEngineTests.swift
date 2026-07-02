@@ -108,6 +108,30 @@ final class RefreshEngineTests: XCTestCase {
         XCTAssertEqual(prs.first { $0.id == "N2" }?.ciState, CIState.none, "failed enrich -> un-enriched, not crashed")
     }
 
+    func test_transient_enrich_failure_keeps_previous_enriched_fields() async throws {
+        // A flaky 5xx on one PR must not reset it to "not waiting" — that would
+        // flicker the badge and re-fire the notification edge next pass.
+        let searchBody = #"{"items":[{"number":1,"title":"fresh title","html_url":"https://github.com/o/r/pull/1","node_id":"N1","draft":false,"user":{"login":"other"},"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-06-02T10:00:00Z"}]}"#
+        let transport = RouteTransport { req in
+            let u = req.url!.absoluteString
+            if u.contains("/search/issues") { return (200, d(searchBody), [:]) }
+            return (500, Data(), [:])   // enrich fails this pass
+        }
+        let old = PullRequest(id: "N1", number: 1, repoFullName: "o/r", title: "old title",
+                              htmlURL: URL(string: "https://github.com/o/r/pull/1")!,
+                              isDraft: false, author: "other", headSHA: "s1",
+                              ciState: .failing, waitingOnMe: true,
+                              waitReason: .reviewRequested, updatedAt: Date())
+        let engine = RefreshEngine(client: GitHubClient(transport: transport, token: "t"))
+        let prs = try await engine.refresh(filters: [], viewer: ViewerContext(login: "me"), previous: [old])
+        let pr = prs.first { $0.id == "N1" }!
+        XCTAssertEqual(pr.title, "fresh title", "search-level fields stay fresh")
+        XCTAssertTrue(pr.waitingOnMe, "enriched fields fall back to the previous pass")
+        XCTAssertEqual(pr.waitReason, .reviewRequested)
+        XCTAssertEqual(pr.ciState, .failing)
+        XCTAssertEqual(pr.headSHA, "s1")
+    }
+
     func test_rateLimited_propagates_from_pass() async throws {
         let searchBody = #"{"items":[{"number":1,"title":"t","html_url":"https://github.com/o/r/pull/1","node_id":"N1","draft":false,"user":{"login":"me"},"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-06-01T10:00:00Z"}]}"#
         let transport = RouteTransport { req in

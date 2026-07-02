@@ -29,6 +29,8 @@ public actor GitHubClient {
     private var etagOrder: [String] = []          // FIFO for bounded eviction
     private let etagCap = 600                      // cap: check-runs keyed by head SHA grow forever otherwise
 
+    /// `etagCache` pre-population is test-only; eviction order for pre-seeded
+    /// entries is undefined (dictionary key order).
     public init(transport: Transport, token: String? = nil,
                 baseURL: URL = GitHubClient.dotComBase,
                 etagCache: [String: (etag: String, data: Data)] = [:]) {
@@ -78,6 +80,21 @@ public actor GitHubClient {
         while let current = url {
             let (data, http) = try await rawGet(url: current)
             out.append(contentsOf: try decode([T].self, from: data, url: current))
+            url = Self.nextLink(from: http)
+        }
+        return out
+    }
+
+    /// Decode a paginated endpoint whose page is a wrapper OBJECT (e.g. check-runs'
+    /// `{total_count, check_runs}`), following `Link: rel="next"` to the end.
+    /// `pathAndQuery` may carry query params (unlike `getCollection`'s plain path).
+    func getPages<Page: Decodable & Sendable>(_ type: Page.Type = Page.self,
+                                              pathAndQuery: String) async throws -> [Page] {
+        var url: URL? = URL(string: baseURL.absoluteString + pathAndQuery)
+        var out: [Page] = []
+        while let current = url {
+            let (data, http) = try await rawGet(url: current)
+            out.append(try decode(Page.self, from: data, url: current))
             url = Self.nextLink(from: http)
         }
         return out

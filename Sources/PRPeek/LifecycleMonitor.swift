@@ -11,22 +11,30 @@ final class LifecycleMonitor {
     var onNetworkSatisfied: (@MainActor () -> Void)?
 
     private let monitor = NWPathMonitor()
+    // nonisolated(unsafe): deinit is nonisolated and has exclusive access; tokens
+    // are only mutated from the main actor in start().
+    nonisolated(unsafe) private var observerTokens: [NSObjectProtocol] = []
     private(set) var networkAvailable = true
+
+    deinit {
+        observerTokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        monitor.cancel()
+    }
 
     func start() {
         let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+        observerTokens.append(nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 AppLog.lifecycle.info("System will sleep")
                 self?.onSleep?()
             }
-        }
-        nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        observerTokens.append(nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 AppLog.lifecycle.info("System did wake")
                 self?.onWake?()
             }
-        }
+        })
         monitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor in
                 guard let self else { return }

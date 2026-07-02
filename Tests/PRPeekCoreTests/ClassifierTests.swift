@@ -90,6 +90,22 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(state, .failing)
     }
 
+    func test_ciState_follows_pagination_to_find_failure_past_page_one() async throws {
+        // Check-runs paginate (default 30/page): a failing run on page 2 must count.
+        let page2URL = "https://api.github.com/repos/o/r/commits/abc/check-runs?per_page=100&page=2"
+        let transport = RouteTransport { req in
+            let u = req.url!.absoluteString
+            if u == page2URL {
+                return (200, Data(#"{"check_runs":[{"status":"completed","conclusion":"failure"}]}"#.utf8), [:])
+            }
+            return (200, Data(#"{"check_runs":[{"status":"completed","conclusion":"success"}]}"#.utf8),
+                    ["Link": "<\(page2URL)>; rel=\"next\""])
+        }
+        let client = GitHubClient(transport: transport, token: "t")
+        let state = try await client.ciState(owner: "o", repo: "r", sha: "abc")
+        XCTAssertEqual(state, .failing, "failure on page 2 must not be masked by page 1")
+    }
+
     func test_pullDetail_parses_reviewers_and_teams() async throws {
         let body = #"{"draft":false,"head":{"sha":"deadbeef"},"requested_reviewers":[{"login":"me"}],"requested_teams":[{"slug":"reviewers"}]}"#
         let client = GitHubClient(transport: FakeTransport([(200, Data(body.utf8))]), token: "t")

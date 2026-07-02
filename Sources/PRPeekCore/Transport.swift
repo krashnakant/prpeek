@@ -21,6 +21,10 @@ public struct URLSessionTransport: Transport {
                 throw GitHubError.invalidResponse
             }
             return (data, http)
+        } catch let e as URLError where e.code == .cancelled {
+            // Task cancellation (loop restart), not a network condition — keep it
+            // a CancellationError so callers don't flash an offline/error status.
+            throw CancellationError()
         } catch is URLError {
             // offline / timeout / DNS / etc -> the app's "hold + show cached" path
             throw GitHubError.network

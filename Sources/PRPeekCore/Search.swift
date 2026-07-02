@@ -72,6 +72,8 @@ public struct SearchService: Sendable {
     }
 
     /// Build "/search/issues?q=...&per_page=100" with the query percent-encoded.
+    /// Watch-item: GitHub is migrating issues search to "advanced search" semantics;
+    /// if legacy `/search/issues` behavior changes, revisit this query builder.
     static func searchPath(filters: [String], involvement: String = "involves:@me") -> String {
         var terms = ["is:pr", "is:open", "archived:false", involvement]
         terms += filters.map { "repo:\($0)" }

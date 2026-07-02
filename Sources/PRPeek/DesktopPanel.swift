@@ -106,6 +106,7 @@ final class DesktopPanel: NSObject {
     private func makeWindow() -> NSWindow {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 390),
                          styleMask: [.borderless], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false   // we hold a strong ref; AppKit must not release on close
         w.isOpaque = false
         w.backgroundColor = .clear
         w.hasShadow = true

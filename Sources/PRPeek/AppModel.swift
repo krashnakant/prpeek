@@ -49,6 +49,7 @@ final class AppModel {
     private var tokenKnown = false
     private var hasToken = false
     private var refreshing = false
+    private var refreshPending = false   // a tick arrived mid-refresh; run once more after
     private var loopTask: Task<Void, Never>?
     private var signInTask: Task<Void, Never>?
     /// Bumped on every token change / sign-out. A refresh started under an old
@@ -170,10 +171,10 @@ final class AppModel {
         self.engine = RefreshEngine(client: client)
         let client = self.client   // capture the actor, not self, for the @Sendable fetch closures
         self.commentsCache = PerPRLazyCache { o, r, n in
-            (try? await client.reviewThread(owner: o, repo: r, number: n)) ?? []
+            try? await client.reviewThread(owner: o, repo: r, number: n)
         }
         self.commitsCache = PerPRLazyCache { o, r, n in
-            (try? await client.commits(owner: o, repo: r, number: n)) ?? []
+            try? await client.commits(owner: o, repo: r, number: n)
         }
         // Locked (readOK false) -> .loading so the loop retries; don't claim signed-out.
         self.status = (readOK && token == nil) ? .signedOut : .loading
@@ -231,11 +232,18 @@ final class AppModel {
         guard hasToken else { setStatus(.signedOut); return }
         guard lifecycle.networkAvailable else { setStatus(.offline); return }
         guard !refreshing else {
-            AppLog.appModel.debug("Refresh skipped because another refresh is active")
+            AppLog.appModel.debug("Refresh queued because another refresh is active")
+            refreshPending = true   // e.g. wake poll landing on a timer tick — don't drop it
             return
         }     // single-flight: coalesce overlapping ticks
         refreshing = true
-        defer { refreshing = false }
+        defer {
+            refreshing = false
+            if refreshPending {
+                refreshPending = false
+                Task { await self.refreshNow() }
+            }
+        }
         let myEpoch = epoch                   // detect token change mid-flight
         if status != .loaded { setStatus(.loading) }
 
@@ -244,9 +252,9 @@ final class AppModel {
             let prs: [PullRequest]
             if let v = viewer {
                 fetchedViewer = v
-                prs = try await engine.refresh(filters: state.filters, viewer: v)
+                prs = try await engine.refresh(filters: state.filters, viewer: v, previous: previousPRs)
             } else {
-                let (v, p) = try await engine.refresh(filters: state.filters)
+                let (v, p) = try await engine.refresh(filters: state.filters, previous: previousPRs)
                 fetchedViewer = v; prs = p
             }
             guard myEpoch == epoch else { return }   // token changed -> discard stale (no leakage)
@@ -277,6 +285,10 @@ final class AppModel {
                 "Refresh succeeded total=\(prs.count, privacy: .public) notifications=\(deliveredEventCount, privacy: .public)"
             )
             setStatus(.loaded)
+        } catch is CancellationError {
+            // Loop restart (interval change) cancelled us mid-flight — the new loop
+            // refreshes immediately; don't flash an error/offline status.
+            return
         } catch {
             guard myEpoch == epoch else { return }   // don't clobber status after a token change
             AppLog.appModel.error("Refresh failed: \(String(describing: error), privacy: .private)")

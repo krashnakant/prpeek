@@ -16,16 +16,22 @@ public struct RefreshEngine: Sendable {
     }
 
     /// Resolve the viewer once (login + teams), then refresh.
-    public func refresh(filters: [String] = []) async throws -> (viewer: ViewerContext, prs: [PullRequest]) {
+    public func refresh(filters: [String] = [],
+                        previous: [PullRequest] = []) async throws -> (viewer: ViewerContext, prs: [PullRequest]) {
         let user = try await client.currentUser()
         let teams = try await client.viewerTeamKeys()
         let viewer = ViewerContext(login: user.login, teamKeys: teams)
-        let prs = try await refresh(filters: filters, viewer: viewer)
+        let prs = try await refresh(filters: filters, viewer: viewer, previous: previous)
         return (viewer, prs)
     }
 
     /// Refresh with a known viewer (lets the app cache identity across passes).
-    public func refresh(filters: [String], viewer: ViewerContext) async throws -> [PullRequest] {
+    /// `previous` is the last pass's result: a PR whose enrichment fails this pass
+    /// keeps its previous enriched fields instead of resetting to "not waiting" —
+    /// otherwise one flaky 5xx flickers the badge and re-fires notification edges.
+    public func refresh(filters: [String], viewer: ViewerContext,
+                        previous: [PullRequest] = []) async throws -> [PullRequest] {
+        let prevByID = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let base = try await search.openPRsInvolvingMe(filters: filters, teamKeys: viewer.teamKeys)
         return try await mapConcurrent(base, limit: concurrencyLimit) { pr in
             do {
@@ -36,8 +42,15 @@ public struct RefreshEngine: Sendable {
                 throw GitHubError.unauthorized                     // trigger re-auth
             } catch {
                 // One forbidden/deleted/flaky PR must not freeze the whole menu.
-                // Keep its search-level data un-enriched (CI unknown, not waiting).
-                return pr
+                // Fall back to the last pass's enriched fields (fresh search fields
+                // still win); a PR never enriched stays un-enriched.
+                guard let old = prevByID[pr.id] else { return pr }
+                var out = pr
+                out.headSHA = old.headSHA
+                out.ciState = old.ciState
+                out.waitingOnMe = old.waitingOnMe
+                out.waitReason = old.waitReason
+                return out
             }
         }
     }

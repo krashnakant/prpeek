@@ -63,6 +63,11 @@
   }
   .pill { background: var(--accent); color: #fff; border-radius: 999px; padding: 2px 9px; font-size: 13px; margin-left: 8px; }
 
+  /* Screenshots */
+  .shot { width: 100%; border-radius: 14px; border: 1px solid var(--line); box-shadow: var(--shadow); display: block; }
+  .shot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
+  @media (max-width: 640px) { .shot-grid { grid-template-columns: 1fr; } }
+
   /* Sections */
   section { padding: 56px 0; border-top: 1px solid var(--line); }
   h2 { font-size: 30px; letter-spacing: -.02em; margin: 0 0 8px; text-align: center; }
@@ -121,6 +126,18 @@
     <div class="demo">PRPeek <span class="pill">3 need you</span></div>
   </div>
 </header>
+
+<section>
+  <div class="wrap">
+    <h2>See it in your menu bar</h2>
+    <p class="sub">One click from the menubar icon — your PRs grouped by who they're waiting on, each with commits, CI, and review comments a hover away.</p>
+    <img class="shot" src="screenshots/menu.png" alt="PRPeek menubar dropdown — PRs grouped into Needs me, Mine, and Others">
+    <div class="shot-grid">
+      <img class="shot" src="screenshots/pr-detail.png" alt="A PR expanded to show its commits and review comments">
+      <img class="shot" src="screenshots/panel-search.png" alt="The always-on desktop panel and the keyboard-first Search window">
+    </div>
+  </div>
+</section>
 
 <section>
   <div class="wrap">

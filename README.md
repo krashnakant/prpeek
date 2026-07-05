@@ -16,6 +16,16 @@ PRs scatter across tabs and orgs. PRPeek puts a single color-coded count in your
 menu bar: red with a number when something needs your review or your CI is red,
 calm when you're at inbox zero. No browser tab-hopping.
 
+<p align="center">
+  <img src="docs/screenshots/menu.png" alt="PRPeek menubar dropdown — PRs grouped into Needs me, Mine, and Others" width="760">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/pr-detail.png" alt="A PR expanded to show its commits and review comments" width="380">
+  &nbsp;
+  <img src="docs/screenshots/panel-search.png" alt="The always-on desktop panel and the keyboard-first Search window" width="380">
+</p>
+
 > Prior art, honestly: [Trailer](https://github.com/ptsochantaris/trailer) covers
 > this category and is excellent. PRPeek is smaller and opinionated — it makes
 > "waiting on me" the headline, not a setting.

@@ -101,6 +101,13 @@
     font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
   }
   .note { text-align: center; color: var(--sub); font-size: 13.5px; margin-top: 28px; }
+  .callout {
+    max-width: 680px; margin: 0 auto 28px; background: var(--panel);
+    border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 10px; padding: 16px 18px; font-size: 14.5px; box-shadow: var(--shadow);
+  }
+  .callout b { color: var(--text); }
+  .callout pre { margin: 10px 0 0; }
 
   footer { padding: 48px 0 64px; text-align: center; color: var(--sub); font-size: 14px; border-top: 1px solid var(--line); }
   footer a { color: var(--sub); }
@@ -161,10 +168,14 @@
   <div class="wrap">
     <h2>Install in a minute</h2>
     <p class="sub">No App Store, no account. Download, drag, open.</p>
+    <div class="callout">
+      <b>⚠︎ First launch:</b> PRPeek is ad-hoc signed, <b>not notarized</b>, so macOS Gatekeeper blocks it once ("PRPeek is damaged / can't be opened"). Right-click ▸ Open ▸ Open in the dialog — or clear the quarantine flag from Terminal:
+      <pre>xattr -dr com.apple.quarantine /Applications/PRPeek.app</pre>
+    </div>
     <div class="steps">
       <ol class="steps">
         <li><b>Download <code>PRPeek.dmg</code></b> from the <a href="https://github.com/krashnakant/prpeek/releases/latest">latest release</a> and drag PRPeek to Applications.</li>
-        <li><b>First launch:</b> right-click ▸ Open, then Open in the dialog. The DMG is ad-hoc signed, so Gatekeeper asks once. <pre>xattr -dr com.apple.quarantine /Applications/PRPeek.app</pre></li>
+        <li><b>Clear Gatekeeper</b> once — see the note above — then open PRPeek from Applications.</li>
         <li><b>Sign in:</b> paste a read-only fine-grained PAT (least privilege), or use OAuth device flow. Your token lives in the macOS Keychain.</li>
         <li><b>Done.</b> The badge turns red with your "needs me" count. Click any PR to open it; expand for commits + review comments.</li>
       </ol>

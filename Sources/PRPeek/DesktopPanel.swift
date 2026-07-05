@@ -65,7 +65,7 @@ final class DesktopPanel: NSObject {
         rowsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let p = model.palette
-        guard model.status != .signedOut else {
+        guard !model.status.isSignedOut else {
             addRow(emptyState("person.crop.circle.badge.questionmark",
                               p?.subtext ?? .secondaryLabelColor, "Not signed in"))
             return

@@ -49,7 +49,7 @@ final class StatusController: NSObject {
         )
 
         // Badge
-        let signedOut = model.status == .signedOut
+        let signedOut = model.status.isSignedOut
         let offline = model.status == .offline
         item.button?.image = BadgeRenderer.icon(needsMe: model.needsMe.count,
                                                  total: model.all.count,
@@ -108,7 +108,7 @@ final class StatusController: NSObject {
     private func statusRow() -> NSMenuItem {
         let text: String
         switch model.status {
-        case .signedOut: text = "Not signed in"
+        case .signedOut(let reason): text = reason ?? "Not signed in"
         case .authorizing(let code): text = "Authorizing — code \(code) (copied)"
         case .loading: text = "Refreshing…"
         case .offline: text = "Offline — showing cached"
@@ -498,8 +498,9 @@ final class StatusController: NSObject {
         // the user can paste immediately.
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         field.placeholderString = "ghp_… or github_pat_…"
-        // Accessory app has no Edit menu, so ⌘V is dead. Prefill from the
-        // clipboard if it looks like a token, and give an explicit Paste button.
+        // ⌘V works via the hidden Edit menu (main.swift). Belt-and-braces:
+        // prefill from the clipboard if it looks like a token, plus an explicit
+        // Paste button for mouse-only users.
         let clip = NSPasteboard.general.string(forType: .string) ?? ""
         if clip.hasPrefix("ghp_") || clip.hasPrefix("github_pat_") { field.stringValue = clip }
         alert.accessoryView = field

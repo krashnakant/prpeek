@@ -3,13 +3,18 @@ import ServiceManagement
 import PRPeekCore
 
 enum AppStatus: Equatable {
-    case signedOut
+    /// `reason` is why the session ended (e.g. GitHub rejected the token) —
+    /// nil for a plain signed-out state. Shown in the status row so a bad
+    /// paste or an expired token isn't mistaken for "never signed in".
+    case signedOut(reason: String?)
     case authorizing(code: String)
     case loading
     case loaded
     case offline
     case rateLimited(until: Date?)
     case error(String)
+
+    var isSignedOut: Bool { if case .signedOut = self { true } else { false } }
 }
 
 /// The brain. Owns state, the refresh loop, auth, and lifecycle wiring. Drives
@@ -34,7 +39,7 @@ final class AppModel {
     private let lifecycle = LifecycleMonitor()
 
     private(set) var state: PRPeekState
-    private(set) var status: AppStatus = .signedOut
+    private(set) var status: AppStatus = .signedOut(reason: nil)
     private(set) var theme: Theme = .system
     /// Parsed once per theme change, not re-derived on every menu render (the
     /// Catppuccin palette parses 6 hex strings).
@@ -177,7 +182,7 @@ final class AppModel {
             try? await client.commits(owner: o, repo: r, number: n)
         }
         // Locked (readOK false) -> .loading so the loop retries; don't claim signed-out.
-        self.status = (readOK && token == nil) ? .signedOut : .loading
+        self.status = (readOK && token == nil) ? .signedOut(reason: nil) : .loading
     }
 
     func start() {
@@ -229,7 +234,7 @@ final class AppModel {
                 return
             }
         }
-        guard hasToken else { setStatus(.signedOut); return }
+        guard hasToken else { setStatus(.signedOut(reason: nil)); return }
         guard lifecycle.networkAvailable else { setStatus(.offline); return }
         guard !refreshing else {
             AppLog.appModel.debug("Refresh queued because another refresh is active")
@@ -294,7 +299,7 @@ final class AppModel {
             AppLog.appModel.error("Refresh failed: \(String(describing: error), privacy: .private)")
             switch error {
             case GitHubError.rateLimited(let until): setStatus(.rateLimited(until: until))
-            case GitHubError.unauthorized:           setStatus(.signedOut)
+            case GitHubError.unauthorized:           setStatus(.signedOut(reason: "GitHub rejected the token (expired or revoked?) — sign in again"))
             case GitHubError.network:                setStatus(.offline)
             default:                                 setStatus(.error("\(error)"))
             }
@@ -428,7 +433,7 @@ final class AppModel {
         saveState()
         Task { await client.setToken(nil) }
         loopTask?.cancel()
-        setStatus(.signedOut)
+        setStatus(.signedOut(reason: nil))
     }
 
     /// Mark a token boundary: invalidate in-flight refreshes, reset identity, and

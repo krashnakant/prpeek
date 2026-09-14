@@ -22,6 +22,14 @@ public struct ReviewComment: Sendable, Equatable, Identifiable {
         self.id = id; self.author = author; self.verdict = verdict; self.body = body
         self.location = location; self.createdAt = createdAt; self.htmlURL = htmlURL
     }
+
+    /// The numeric comment id behind the `c` prefix `ReviewThread.merge`
+    /// stamps on inline comments. nil for a review (`r` prefix): reviews have no reply endpoint,
+    /// so a reply to one has to go somewhere else. See `GitHubClient.reply`.
+    public var inlineCommentID: Int? {
+        guard id.hasPrefix("c") else { return nil }
+        return Int(id.dropFirst())
+    }
 }
 
 // MARK: - Wire DTOs
@@ -96,6 +104,17 @@ public enum ReviewThread {
 }
 
 public extension GitHubClient {
+    /// Has `login` already submitted a review on this PR? Drives
+    /// first-review-vs-re-review. A PENDING review is your own unsubmitted
+    /// draft, which nobody has seen — it doesn't count as having reviewed.
+    ///
+    /// Shares the reviews URL with `reviewThread`, so opening a PR's submenu
+    /// after a refresh rides the ETag cache and costs a 304, not a fetch.
+    func hasReviewed(owner: String, repo: String, number: Int, login: String) async throws -> Bool {
+        let reviews: [ReviewDTO] = try await getCollection(path: "/repos/\(owner)/\(repo)/pulls/\(number)/reviews")
+        return reviews.contains { $0.user?.login == login && $0.state?.uppercased() != "PENDING" }
+    }
+
     /// On-demand (NOT in the refresh loop): a PR's review thread. Two conditional,
     /// paginated GETs merged into a timeline. ETag-cached like every other read.
     func reviewThread(owner: String, repo: String, number: Int) async throws -> [ReviewComment] {

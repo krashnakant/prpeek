@@ -2,24 +2,12 @@ import AppKit
 import ServiceManagement
 import PRPeekCore
 
-enum AppStatus: Equatable {
-    /// `reason` is why the session ended (e.g. GitHub rejected the token) —
-    /// nil for a plain signed-out state. Shown in the status row so a bad
-    /// paste or an expired token isn't mistaken for "never signed in".
-    case signedOut(reason: String?)
-    case authorizing(code: String)
-    case loading
-    case loaded
-    case offline
-    case rateLimited(until: Date?)
-    case error(String)
-
-    var isSignedOut: Bool { if case .signedOut = self { true } else { false } }
-}
-
 /// The brain. Owns state, the refresh loop, auth, and lifecycle wiring. Drives
 /// the menubar via `onChange`. @MainActor: all UI-facing state stays on main;
-/// only the GitHubClient actor + engine run off it.
+/// only the GitHubClient actors + engines run off it.
+///
+/// Multi-account: every per-identity thing lives in an `AccountSession`; this
+/// type fans a refresh out across them and merges the results into one list.
 @MainActor
 final class AppModel {
     // OAuth App client id (public — device flow needs no secret). Resolution:
@@ -31,38 +19,28 @@ final class AppModel {
         return ""
     }()
 
-    private let tokenStore: TokenStore
     private let store: JSONStore
-    private let client: GitHubClient
-    private let engine: RefreshEngine
     private let notifier = NotificationService()
     private let lifecycle = LifecycleMonitor()
 
+    private(set) var sessions: [AccountSession] = []
     private(set) var state: PRPeekState
     private(set) var status: AppStatus = .signedOut(reason: nil)
     private(set) var theme: Theme = .system
     /// Parsed once per theme change, not re-derived on every menu render (the
-    /// Catppuccin palette parses 6 hex strings).
+    /// Catppuccin palette parses 7 hex strings).
     private(set) var palette: Palette?
-    private var viewer: ViewerContext?
-    private var previousPRs: [PullRequest] = []
     private var seenRepos: Set<String> = []   // every repo seen this session (for the filter picker)
-    // Cache token presence in memory so the 3-min refresh loop never re-reads the
-    // Keychain — each read on an ad-hoc-signed build re-prompts for access.
-    // `tokenKnown` stays false only while a launch read failed (Keychain locked),
-    // so refreshNow retries until it succeeds, then caches.
-    private var tokenKnown = false
-    private var hasToken = false
     private var refreshing = false
     private var refreshPending = false   // a tick arrived mid-refresh; run once more after
     private var loopTask: Task<Void, Never>?
     private var signInTask: Task<Void, Never>?
-    /// Bumped on every token change / sign-out. A refresh started under an old
-    /// token discards its results if the epoch moved (no cross-account leakage).
+    /// Bumped on every token change / account add / removal. A refresh started
+    /// under an old token discards its results if the epoch moved.
+    /// ponytail: one global epoch — removing account B redundantly invalidates
+    /// account A's in-flight pass. Costs one refresh, never correctness; make it
+    /// per-session if that ever shows up.
     private var epoch = 0
-    /// First refresh seeds `previousPRs` WITHOUT notifying — otherwise a fresh
-    /// launch would fire a notification for every existing waiting PR.
-    private var firstPass = true
     /// Poll cadence in seconds, user-configurable (15m/1h/3h/1d). Default 15m —
     /// all options stay well under the search API's 30/min.
     private(set) var refreshIntervalSecs: Int = 900
@@ -73,35 +51,114 @@ final class AppModel {
     /// the controller can repopulate just that submenu (no full menu rebuild).
     var onSubmenuReload: (@MainActor (String) -> Void)?
 
-    // Review comments + commits are fetched on demand (submenu open), never in the
-    // loop. Caches capture the GitHubClient actor (not self) so the fetch closures
-    // are @Sendable — initialized in init once `client` exists.
-    private let commentsCache: PerPRLazyCache<[ReviewComment]>
-    private let commitsCache: PerPRLazyCache<[Commit]>
-
     // Views. `needsMe` drives the red badge, so muted PRs drop out of it.
     var needsMe: [PullRequest] { state.pullRequests.filter { $0.waitingOnMe && !isMuted($0) } }
-    var mine: [PullRequest] { state.pullRequests.filter { $0.author == viewer?.login } }
+    var mine: [PullRequest] { state.pullRequests.filter(\.isMine) }
     var all: [PullRequest] { state.pullRequests }
     var muted: [PullRequest] { state.pullRequests.filter(isMuted) }
     var lastUpdated: Date? { state.lastUpdated }
+    var accounts: [Account] { sessions.map(\.account) }
+
+    // MARK: - Accounts
+
+    func session(for pr: PullRequest) -> AccountSession? {
+        sessions.first { $0.account.id == pr.accountID }
+    }
+    /// nil with a single account: the UI only spends space on an account tag
+    /// once it actually disambiguates something.
+    func accountLabel(for pr: PullRequest) -> String? {
+        guard sessions.count > 1 else { return nil }
+        return session(for: pr)?.displayName
+    }
+
+    /// Add an identity and immediately store its token. GHES accounts come
+    /// through here only: device flow needs an OAuth App registered on that host,
+    /// which a distributed build can't have, so enterprise sign-in is PAT-only.
+    func addAccount(label: String, host: String, token: String) {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let account = Account(host: host.trimmingCharacters(in: .whitespacesAndNewlines),
+                              label: name.isEmpty ? "GitHub" : name)
+        let session = AccountSession(account: account)
+        do { try session.save(token: trimmed) }
+        catch { setStatus(.error("Couldn't save token to Keychain.")); return }
+        AppLog.appModel.info("Account added host=\(account.displayHost, privacy: .public)")
+        sessions.append(session)
+        state.accounts = accounts
+        epoch += 1
+        saveState()
+        Task { await session.client.setToken(trimmed); startLoop() }
+    }
+
+    func removeAccount(_ id: String) {
+        guard let idx = sessions.firstIndex(where: { $0.account.id == id }) else { return }
+        AppLog.appModel.info("Account removed")
+        sessions[idx].signOut()
+        sessions.remove(at: idx)
+        epoch += 1
+        state.forget(account: id)
+        saveState()
+        if sessions.isEmpty { loopTask?.cancel(); setStatus(.signedOut(reason: nil)) }
+        onChange?()
+    }
+
+    /// Remove every account (the old "Sign out"). Not a loop over
+    /// `removeAccount`: that would write the state file and rebuild the menu once
+    /// per account, each time re-serializing rows about to be dropped anyway.
+    func signOutAll() {
+        AppLog.appModel.info("Signing out of every account")
+        signInTask?.cancel(); signInTask = nil
+        sessions.forEach { $0.signOut() }
+        sessions = []
+        epoch += 1
+        state.accounts = []; state.pullRequests = []
+        state.mutes = [:]; state.seen = [:]; state.waitingSince = [:]
+        loopTask?.cancel()
+        saveState()
+        setStatus(.signedOut(reason: nil))
+    }
+
+    // MARK: - Freshness (new / seen / stale / re-review)
+
+    /// nil = not waiting on you, so no freshness marker.
+    func freshness(_ pr: PullRequest) -> PRFreshness? {
+        Freshness.state(for: pr, seen: state.seen[pr.key],
+                        waitingSince: state.waitingSince[pr.key], now: Date())
+    }
+
+    /// The user looked at this PR — opened it in the browser, or opened its
+    /// submenu to read the reviews. Flips `.new` to `.seen`.
+    func markSeen(_ pr: PullRequest) {
+        guard state.seen[pr.key] == nil else { return }
+        state.seen[pr.key] = Date()
+        scheduleSave()   // hovering down a section marks every row: coalesce the writes
+        onChange?()
+    }
+
+    /// Open a PR and count it as seen — the one path the UI should use, so no
+    /// surface can open a PR without clearing its "new" marker.
+    func open(_ pr: PullRequest) {
+        markSeen(pr)
+        NSWorkspace.shared.open(pr.htmlURL)
+    }
 
     // MARK: - Mute / snooze (local triage, no API)
     func isMuted(_ pr: PullRequest) -> Bool { state.isMuted(pr, now: Date()) }
     /// Snooze for a fixed window (e.g. 1h, 4h).
     func mute(_ pr: PullRequest, for interval: TimeInterval) {
         AppLog.appModel.info("Muted PR for seconds=\(Int(interval), privacy: .public)")
-        state.mutes[pr.id] = Mute(updatedAtSnapshot: pr.updatedAt, until: Date().addingTimeInterval(interval))
+        state.mutes[pr.key] = Mute(updatedAtSnapshot: pr.updatedAt, until: Date().addingTimeInterval(interval))
         saveState(); onChange?()
     }
     /// Hide until the PR changes (its `updatedAt` moves).
     func muteUntilUpdated(_ pr: PullRequest) {
         AppLog.appModel.info("Muted PR until update")
-        state.mutes[pr.id] = Mute(updatedAtSnapshot: pr.updatedAt, until: nil)
+        state.mutes[pr.key] = Mute(updatedAtSnapshot: pr.updatedAt, until: nil)
         saveState(); onChange?()
     }
     func unmute(_ pr: PullRequest) {
-        guard state.mutes.removeValue(forKey: pr.id) != nil else { return }
+        guard state.mutes.removeValue(forKey: pr.key) != nil else { return }
         AppLog.appModel.info("Unmuted PR")
         saveState(); onChange?()
     }
@@ -119,18 +176,10 @@ final class AppModel {
         }
         onChange?()
     }
-    /// Drop mutes for PRs that are gone or whose snooze has lapsed — keeps the
-    /// dictionary from growing without bound.
-    private func pruneMutes(against prs: [PullRequest]) {
-        let now = Date()
-        let byID = Dictionary(prs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        state.mutes = state.mutes.filter { id, m in
-            guard let pr = byID[id] else { return false }
-            return m.active(for: pr, now: now)
-        }
-    }
-
     // Repo filter (UI: "Filter repos" submenu). `state.filters` empty == all repos.
+    // ponytail: one global list across accounts — a `repo:` qualifier naming a
+    // repo an account can't see just matches nothing there, so no per-account
+    // wiring is needed until someone has same-named repos on two hosts.
     var repoFilters: [String] { state.filters }
     /// Repos to offer in the picker: every repo seen this session, plus current
     /// PRs and active filters. Accumulator means a repo you uncheck (and thus
@@ -153,10 +202,12 @@ final class AppModel {
     }
 
     init() {
-        self.tokenStore = KeychainTokenStore()
         self.store = JSONStore(url: JSONStore.defaultURL())
         self.state = store.load()                 // instant cached PRs on launch
-        self.previousPRs = state.pullRequests
+        // Pre-multi-account install: adopt the existing token and cache as the
+        // primary account instead of dropping the user at a sign-in screen.
+        let legacyHost = UserDefaults.standard.string(forKey: "githubHost") ?? ""
+        state.migrate(adopting: Account(id: Account.primaryID, host: legacyHost, label: "GitHub"))
         self.seenRepos = Set(state.pullRequests.map(\.repoFullName))
         self.theme = UserDefaults.standard.string(forKey: "theme").flatMap(Theme.init) ?? .system
         self.palette = theme.palette
@@ -164,25 +215,9 @@ final class AppModel {
         if let secs = UserDefaults.standard.object(forKey: "refreshIntervalSecs") as? Int, secs > 0 {
             self.refreshIntervalSecs = secs
         }
-        let token: String?
-        let readOK: Bool
-        do { token = try tokenStore.read(); readOK = true }
-        catch { token = nil; readOK = false }   // Keychain locked at launch
-        self.tokenKnown = readOK
-        self.hasToken = readOK && token != nil
-        // GitHub Enterprise Server: blank host == github.com (api.github.com).
-        let apiBase = GitHubClient.apiBase(forHost: UserDefaults.standard.string(forKey: "githubHost") ?? "")
-        self.client = GitHubClient(transport: URLSessionTransport(), token: token, baseURL: apiBase)
-        self.engine = RefreshEngine(client: client)
-        let client = self.client   // capture the actor, not self, for the @Sendable fetch closures
-        self.commentsCache = PerPRLazyCache { o, r, n in
-            try? await client.reviewThread(owner: o, repo: r, number: n)
-        }
-        self.commitsCache = PerPRLazyCache { o, r, n in
-            try? await client.commits(owner: o, repo: r, number: n)
-        }
-        // Locked (readOK false) -> .loading so the loop retries; don't claim signed-out.
-        self.status = (readOK && token == nil) ? .signedOut(reason: nil) : .loading
+        let cached = Dictionary(grouping: state.pullRequests, by: \.accountID)
+        self.sessions = state.accounts.map { AccountSession(account: $0, cachedPRs: cached[$0.id] ?? []) }
+        self.status = AppStatus.aggregate(sessions.map(\.status))
     }
 
     func start() {
@@ -223,18 +258,7 @@ final class AppModel {
 
     func refreshNow() async {
         AppLog.appModel.debug("Refresh requested status=\(self.status.logName, privacy: .public)")
-        if !tokenKnown {   // launch read was blocked (Keychain locked) — retry, don't re-read once known
-            do {
-                let t = try tokenStore.read()
-                hasToken = t != nil; tokenKnown = true
-                if let t { await client.setToken(t) }   // deliver it: client was built token-less on a locked launch
-            } catch {
-                AppLog.appModel.error("Refresh blocked by Keychain read failure: \(String(describing: error), privacy: .private)")
-                setStatus(.error("Keychain locked — unlock to refresh"))
-                return
-            }
-        }
-        guard hasToken else { setStatus(.signedOut(reason: nil)); return }
+        guard !sessions.isEmpty else { setStatus(.signedOut(reason: nil)); return }
         guard lifecycle.networkAvailable else { setStatus(.offline); return }
         guard !refreshing else {
             AppLog.appModel.debug("Refresh queued because another refresh is active")
@@ -249,76 +273,198 @@ final class AppModel {
                 Task { await self.refreshNow() }
             }
         }
-        let myEpoch = epoch                   // detect token change mid-flight
+        let myEpoch = epoch                   // detect account/token change mid-flight
         if status != .loaded { setStatus(.loading) }
 
+        // Each account refreshes independently: one rate-limited or broken
+        // account must not blank the others' PRs.
+        // Accounts are independent — separate tokens, often separate hosts — and
+        // GitHub's rate limits are per-token, so overlapping them costs nothing
+        // and makes a pass take as long as the slowest account, not all of them.
+        // Each engine still self-caps its own fan-out.
+        var events: [NotificationEvent] = []
+        var merged: [PullRequest] = []
+        let running = sessions.map { session in
+            (session, Task { await self.refresh(session) })
+        }
+        for (session, task) in running {
+            let prs = await task.value
+            merged += prs
+            events += pendingEvents(for: session, current: prs)
+            session.previousPRs = prs
+            session.firstPass = false
+        }
+        guard myEpoch == epoch else { return }   // account set changed -> discard stale
+
+        let now = Date()
+        // Don't notify for still-snoozed PRs (the whole point of a snooze)...
+        let mutedKeys = Set(merged.filter { state.isMuted($0, now: now) }.map(\.key))
+        var out = events.filter { !mutedKeys.contains($0.prKey) }
+        // ...but a "hide until updated" mute that just cleared re-notifies once.
+        // Read mutes BEFORE pruneMutes drops the cleared entry.
+        var seenIDs = Set(out.map(\.id))
+        for e in NotificationPlanner.resurfacedMutes(current: merged, mutes: state.mutes, now: now)
+        where !seenIDs.contains(e.id) { seenIDs.insert(e.id); out.append(e) }
+        notifier.deliver(out)
+
+        state.pullRequests = merged
+        state.prune(against: merged, now: now)
+        seenRepos.formUnion(merged.map(\.repoFullName))   // remember repos even after they're filtered out
+        state.lastUpdated = now
+        saveState()
+        AppLog.appModel.debug(
+            "Refresh finished total=\(merged.count, privacy: .public) notifications=\(out.count, privacy: .public)"
+        )
+        setStatus(AppStatus.aggregate(sessions.map(\.status)))
+    }
+
+    /// One account's pass. Never throws: a failure is recorded on the session's
+    /// own status and its last-known PRs are kept, so the merged list degrades
+    /// per account instead of all at once.
+    private func refresh(_ session: AccountSession) async -> [PullRequest] {
+        guard await session.resolveTokenIfNeeded() else {
+            AppLog.appModel.error("Refresh blocked by Keychain read failure")
+            session.status = .error("Keychain locked — unlock to refresh")
+            return session.previousPRs
+        }
+        guard session.hasToken else {
+            session.status = .signedOut(reason: nil)
+            return []
+        }
         do {
-            let fetchedViewer: ViewerContext?
             let prs: [PullRequest]
-            if let v = viewer {
-                fetchedViewer = v
-                prs = try await engine.refresh(filters: state.filters, viewer: v, previous: previousPRs)
+            if let v = session.viewer {
+                prs = try await session.engine.refresh(filters: state.filters, viewer: v,
+                                                       previous: session.previousPRs)
             } else {
-                let (v, p) = try await engine.refresh(filters: state.filters, previous: previousPRs)
-                fetchedViewer = v; prs = p
+                let (v, fetched) = try await session.engine.refresh(filters: state.filters,
+                                                                    previous: session.previousPRs)
+                session.viewer = v
+                prs = fetched
             }
-            guard myEpoch == epoch else { return }   // token changed -> discard stale (no leakage)
-            if let v = fetchedViewer { viewer = v }
-            var deliveredEventCount = 0
-            if let login = viewer?.login, !firstPass {
-                let now = Date()
-                // Don't notify for still-snoozed PRs (the whole point of a snooze)...
-                let mutedIDs = Set(prs.filter { state.isMuted($0, now: now) }.map(\.id))
-                var events = NotificationPlanner.events(previous: previousPRs, current: prs, viewerLogin: login)
-                    .filter { !mutedIDs.contains($0.prID) }
-                // ...but a "hide until updated" mute that just cleared re-notifies once.
-                // Read mutes BEFORE pruneMutes drops the cleared entry.
-                var seen = Set(events.map(\.id))
-                for e in NotificationPlanner.resurfacedMutes(current: prs, mutes: state.mutes, now: now)
-                where !seen.contains(e.id) { seen.insert(e.id); events.append(e) }
-                deliveredEventCount = events.count
-                notifier.deliver(events)
-            }
-            firstPass = false
-            previousPRs = prs
-            state.pullRequests = prs
-            pruneMutes(against: prs)
-            seenRepos.formUnion(prs.map(\.repoFullName))   // remember repos even after they're filtered out
-            state.lastUpdated = Date()
-            saveState()
-            AppLog.appModel.debug(
-                "Refresh succeeded total=\(prs.count, privacy: .public) notifications=\(deliveredEventCount, privacy: .public)"
-            )
-            setStatus(.loaded)
+            session.status = .loaded   // both paths: a good pass clears a stale error
+            return prs
         } catch is CancellationError {
             // Loop restart (interval change) cancelled us mid-flight — the new loop
             // refreshes immediately; don't flash an error/offline status.
-            return
+            return session.previousPRs
         } catch {
-            guard myEpoch == epoch else { return }   // don't clobber status after a token change
             AppLog.appModel.error("Refresh failed: \(String(describing: error), privacy: .private)")
             switch error {
-            case GitHubError.rateLimited(let until): setStatus(.rateLimited(until: until))
-            case GitHubError.unauthorized:           setStatus(.signedOut(reason: "GitHub rejected the token (expired or revoked?) — sign in again"))
-            case GitHubError.network:                setStatus(.offline)
-            default:                                 setStatus(.error("\(error)"))
+            case GitHubError.rateLimited(let until): session.status = .rateLimited(until: until)
+            case GitHubError.unauthorized:
+                session.status = .signedOut(reason: "GitHub rejected the token (expired or revoked?) — sign in again")
+            case GitHubError.network:                session.status = .offline
+            default:                                 session.status = .error("\(error)")
             }
+            return session.previousPRs
         }
     }
 
-    // MARK: - Review comments + commits (lazy, per-PR)
-    // nil from value(for:) = not loaded yet; non-nil = loaded (may be empty).
-
-    func comments(for pr: PullRequest) -> [ReviewComment]? { commentsCache.value(for: pr) }
-    func isLoadingComments(_ pr: PullRequest) -> Bool { commentsCache.isLoading(pr) }
-    func loadComments(for pr: PullRequest) {
-        commentsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
+    /// Edge-triggered notifications for one account, suppressed on its first pass
+    /// (a fresh launch, or a just-added account, must not fire for every PR that
+    /// was already waiting).
+    private func pendingEvents(for session: AccountSession, current: [PullRequest]) -> [NotificationEvent] {
+        guard !session.firstPass else { return [] }
+        return NotificationPlanner.events(previous: session.previousPRs, current: current)
     }
 
-    func commits(for pr: PullRequest) -> [Commit]? { commitsCache.value(for: pr) }
-    func isLoadingCommits(_ pr: PullRequest) -> Bool { commitsCache.isLoading(pr) }
+    // MARK: - Review comments + commits (lazy, per-PR, routed to the PR's account)
+    // nil from value(for:) = not loaded yet; non-nil = loaded (may be empty).
+
+    func comments(for pr: PullRequest) -> [ReviewComment]? { session(for: pr)?.commentsCache.value(for: pr) }
+    func isLoadingComments(_ pr: PullRequest) -> Bool { session(for: pr)?.commentsCache.isLoading(pr) ?? false }
+    func loadComments(for pr: PullRequest) {
+        session(for: pr)?.commentsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
+    }
+
+    func commits(for pr: PullRequest) -> [Commit]? { session(for: pr)?.commitsCache.value(for: pr) }
+    func isLoadingCommits(_ pr: PullRequest) -> Bool { session(for: pr)?.commitsCache.isLoading(pr) ?? false }
     func loadCommits(for pr: PullRequest) {
-        commitsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
+        session(for: pr)?.commitsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
+    }
+
+    // MARK: - Write actions (the only calls that change anything on GitHub)
+    // Each returns nil on success or a sentence to show the user. Failures do NOT
+    // go through `status`: that badge reports the refresh loop's health, and a
+    // rejected merge the user just asked for is not a broken app.
+
+    /// Merge the PR, pinned to the head commit currently in the menu.
+    func merge(_ pr: PullRequest, method: MergeMethod) async -> String? {
+        guard let client = session(for: pr)?.client else { return "No account for this PR." }
+        guard let sha = pr.headSHA else { return "No head commit known yet — refresh and try again." }
+        let (owner, repo) = pr.ownerRepo
+        AppLog.appModel.info("Merge requested method=\(method.rawValue, privacy: .public)")
+        return await perform {
+            try await client.merge(owner: owner, repo: repo, number: pr.number, headSHA: sha, method: method)
+        }
+    }
+
+    /// Ask `login` to look again. See `GitHubClient.requestReview` — same endpoint
+    /// as a first request, because GitHub un-requests a reviewer when they submit.
+    func requestReview(_ pr: PullRequest, from login: String) async -> String? {
+        guard let client = session(for: pr)?.client else { return "No account for this PR." }
+        let (owner, repo) = pr.ownerRepo
+        AppLog.appModel.info("Re-review requested")
+        return await perform {
+            try await client.requestReview(owner: owner, repo: repo, number: pr.number, reviewers: [login])
+        }
+    }
+
+    /// Post a reply to one review comment, then drop the cached thread so the
+    /// submenu refetches it (the reply is now part of it).
+    func reply(to comment: ReviewComment, on pr: PullRequest, body: String) async -> String? {
+        guard let session = session(for: pr) else { return "No account for this PR." }
+        let (owner, repo) = pr.ownerRepo
+        AppLog.appModel.info("Reply requested threaded=\(comment.inlineCommentID != nil, privacy: .public)")
+        let failure = await perform {
+            try await session.client.reply(owner: owner, repo: repo, number: pr.number, to: comment, body: body)
+        }
+        if failure == nil { session.commentsCache.reset() }
+        return failure
+    }
+
+    /// Who could be asked to look again: everyone who has already reviewed, minus
+    /// you. Read straight off the cached thread — no extra request.
+    func pastReviewers(of pr: PullRequest) -> [String] {
+        guard let comments = comments(for: pr) else { return [] }
+        let me = session(for: pr)?.viewer?.login
+        var seen = Set<String>()
+        return comments.map(\.author).filter { $0 != "?" && $0 != me && seen.insert($0).inserted }
+    }
+
+    /// Run a write, refresh so the menu reflects it, translate any failure.
+    private func perform(_ op: () async throws -> Void) async -> String? {
+        do {
+            try await op()
+            kickRefresh()
+            return nil
+        } catch {
+            AppLog.appModel.error("Write action failed: \(String(describing: error), privacy: .private)")
+            return Self.failureText(error)
+        }
+    }
+
+    /// A write failure is something the user just asked for, so it gets a
+    /// sentence with a remedy — not the enum case dumped into a status row.
+    static func failureText(_ error: Error) -> String {
+        switch error {
+        case GitHubError.unauthorized:
+            return "GitHub rejected the token (expired or revoked?) — sign in again."
+        case GitHubError.forbidden:
+            // Covers both halves of "no": a read-only token, or a repo you can't
+            // push to. GitHub answers 403/404 for either, so say both.
+            return "No write access. The token needs Pull requests: Write (fine-grained) or repo "
+                 + "(classic), and the account needs write access to this repository."
+        case GitHubError.rateLimited:
+            return "GitHub is rate-limiting this account — try again in a few minutes."
+        case GitHubError.rejected(_, let message) where !message.isEmpty:
+            return message                      // GitHub's own sentence beats ours
+        case GitHubError.network:
+            return "No network."
+        default:
+            return "Failed: \(error)"
+        }
     }
 
     func setTheme(_ t: Theme) {
@@ -328,15 +474,6 @@ final class AppModel {
         Theme.apply(t)
         AppLog.appModel.info("Theme changed")
         onChange?()   // re-render with the new palette
-    }
-
-    var githubHost: String { UserDefaults.standard.string(forKey: "githubHost") ?? "" }
-    /// Persist the GHES host. The client is built once at launch (and captured by
-    /// the lazy caches), so a host change needs a relaunch — the UI says so.
-    /// ponytail: rebuild client+engine in place if hot-switching ever matters.
-    func setGitHubHost(_ host: String) {
-        UserDefaults.standard.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "githubHost")
-        AppLog.appModel.info("GitHub host setting changed")
     }
 
     func setRefreshInterval(_ secs: Int) {
@@ -358,22 +495,30 @@ final class AppModel {
         onChange?()
     }
     private func saveState() {
+        saveScheduled = false
         do { try store.save(state) } catch { /* disk-full etc: cache is best-effort, keep running */ }
+    }
+
+    private var saveScheduled = false
+    /// Coalesce a burst of small edits into one write. Walking down the menu
+    /// marks each PR seen in turn; without this that's one full encode + atomic
+    /// rename of the whole state file per row, on the main actor, during menu
+    /// tracking.
+    private func scheduleSave() {
+        guard !saveScheduled else { return }
+        saveScheduled = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard saveScheduled else { return }   // a full save already flushed it
+            saveState()
+        }
     }
 
     // MARK: - Auth
 
-    func pastePAT(_ token: String) {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        do { try tokenStore.save(trimmed) }
-        catch { setStatus(.error("Couldn't save token to Keychain.")); return }
-        AppLog.appModel.info("PAT saved")
-        tokenKnown = true; hasToken = true
-        beginNewSession()
-        Task { await client.setToken(trimmed); startLoop() }
-    }
-
+    /// Device flow, github.com only. A GHES host needs an OAuth App registered on
+    /// that host, which a distributed build has no id for — enterprise accounts
+    /// come in through `addAccount(label:host:token:)` with a PAT instead.
     func signInWithDeviceFlow() {
         guard !Self.clientID.isEmpty else {
             setStatus(.error("No client id — register an OAuth App (Settings ▸ Developer settings), "
@@ -381,8 +526,8 @@ final class AppModel {
         }
         guard signInTask == nil else { return }   // re-entrancy guard: one sign-in at a time
         AppLog.appModel.info("Device sign-in started")
-        let webBase = GitHubClient.webBase(forHost: UserDefaults.standard.string(forKey: "githubHost") ?? "")
-        let flow = DeviceFlowAuth(transport: URLSessionTransport(), clientID: Self.clientID, webBaseURL: webBase)
+        let flow = DeviceFlowAuth(transport: URLSessionTransport(), clientID: Self.clientID,
+                                  webBaseURL: GitHubClient.webBase(forHost: ""))
         signInTask = Task { [weak self] in
             guard let self else { return }
             defer { self.signInTask = nil }
@@ -400,13 +545,8 @@ final class AppModel {
                         if let url = code.bestVerificationURL { NSWorkspace.shared.open(url) }
                     }
                 })
-                do { try self.tokenStore.save(token) }
-                catch { self.setStatus(.error("Couldn't save token to Keychain.")); return }
                 AppLog.appModel.info("Device sign-in completed")
-                self.tokenKnown = true; self.hasToken = true
-                self.beginNewSession()
-                await self.client.setToken(token)
-                self.startLoop()
+                self.addAccount(label: "GitHub", host: "", token: token)
             } catch DeviceFlowAuth.DeviceFlowError.denied {
                 AppLog.appModel.error("Device sign-in denied")
                 self.setStatus(.error("Authorization denied."))
@@ -420,29 +560,5 @@ final class AppModel {
                 self.setStatus(.error("Sign-in failed: \(error)"))
             }
         }
-    }
-
-    func signOut() {
-        AppLog.appModel.info("Signing out")
-        signInTask?.cancel(); signInTask = nil
-        beginNewSession()
-        tokenKnown = true; hasToken = false
-        do { try tokenStore.delete() } catch { /* best effort; in-memory token cleared below */ }
-        previousPRs = []
-        state.pullRequests = []
-        saveState()
-        Task { await client.setToken(nil) }
-        loopTask?.cancel()
-        setStatus(.signedOut(reason: nil))
-    }
-
-    /// Mark a token boundary: invalidate in-flight refreshes, reset identity, and
-    /// suppress the next pass's notifications.
-    private func beginNewSession() {
-        epoch += 1
-        AppLog.appModel.debug("Session epoch advanced")
-        viewer = nil
-        firstPass = true
-        commentsCache.reset(); commitsCache.reset()   // account-scoped
     }
 }

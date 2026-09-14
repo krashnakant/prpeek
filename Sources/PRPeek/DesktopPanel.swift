@@ -15,6 +15,9 @@ final class DesktopPanel: NSObject {
     private let summaryLabel = NSTextField(labelWithString: "")
     private let rowsStack = NSStackView()
     private let footerLabel = NSTextField(labelWithString: "")
+    /// Height of the rows area — driven by content (see `resizeToFit`), capped.
+    private var rowsHeight: NSLayoutConstraint!
+    private static let maxRowsHeight: CGFloat = 270
 
     init(model: AppModel) {
         self.model = model
@@ -67,7 +70,9 @@ final class DesktopPanel: NSObject {
         let p = model.palette
         guard !model.status.isSignedOut else {
             addRow(emptyState("person.crop.circle.badge.questionmark",
-                              p?.subtext ?? .secondaryLabelColor, "Not signed in"))
+                              p?.subtext ?? .secondaryLabelColor, "Not signed in",
+                              actionTitle: "Sign in with GitHub", actionSel: #selector(signInClicked)))
+            resizeToFit()
             return
         }
 
@@ -87,6 +92,23 @@ final class DesktopPanel: NSObject {
                 addRow(messageRow("+\(needs.count - cap) more in the menu"))
             }
         }
+        resizeToFit()
+    }
+
+    /// Shrink the panel to the rows it actually has (capped), so a one-PR panel
+    /// isn't three-quarters empty space. Keeps the top edge pinned while the
+    /// bottom moves, which is where the user's eye already is.
+    private func resizeToFit() {
+        guard let w = window, let content = w.contentView else { return }
+        rowsStack.layoutSubtreeIfNeeded()
+        rowsHeight.constant = min(rowsStack.fittingSize.height, Self.maxRowsHeight)
+        content.layoutSubtreeIfNeeded()
+        let height = content.fittingSize.height
+        guard abs(height - w.frame.height) > 0.5 else { return }
+        var frame = w.frame              // borderless: frame height == content height
+        frame.origin.y += frame.height - height
+        frame.size.height = height
+        w.setFrame(frame, display: true)
     }
 
     // MARK: - Actions
@@ -101,6 +123,11 @@ final class DesktopPanel: NSObject {
         hide()
     }
 
+    @objc private func signInClicked() {
+        AppLog.desktopPanel.info("Desktop panel sign-in clicked")
+        model.signInWithDeviceFlow()
+    }
+
     // MARK: - Build
 
     private func makeWindow() -> NSWindow {
@@ -113,7 +140,7 @@ final class DesktopPanel: NSObject {
         w.isMovableByWindowBackground = true
         // Pin width to 340 — a borderless window otherwise grows to fit the
         // longest untruncated title instead of truncating it.
-        w.contentMinSize = NSSize(width: 340, height: 200)
+        w.contentMinSize = NSSize(width: 340, height: 120)   // low: `resizeToFit` drives the height
         w.contentMaxSize = NSSize(width: 340, height: 4000)
         w.setFrameAutosaveName("PRPeekDesktopPanel")
         w.contentView = rootView()
@@ -135,6 +162,9 @@ final class DesktopPanel: NSObject {
 
     private func rootView() -> NSView {
         let bg = NSVisualEffectView()
+        // ponytail: the panel's surfaces stay system-vibrant — a Catppuccin
+        // flavor recolors text/glyphs/pills only. Paint base/mantle from the
+        // Palette if the flavors ever need to own the background too.
         bg.material = .hudWindow
         bg.state = .active
         bg.wantsLayer = true
@@ -214,17 +244,20 @@ final class DesktopPanel: NSObject {
         clip.translatesAutoresizingMaskIntoConstraints = false
         clip.documentView = rowsStack
 
+        rowsHeight = clip.heightAnchor.constraint(equalToConstant: Self.maxRowsHeight)
         NSLayoutConstraint.activate([
             rowsStack.widthAnchor.constraint(equalTo: clip.widthAnchor),
-            clip.heightAnchor.constraint(equalToConstant: 270),
+            rowsHeight,
         ])
         return clip
     }
 
     private func prRow(_ pr: PullRequest) -> NSView {
-        PRCardView(pr: pr, palette: model.palette) {
+        PRCardView(pr: pr, palette: model.palette,
+                   freshness: model.freshness(pr),
+                   account: model.accountLabel(for: pr)) { [weak model] in
             AppLog.desktopPanel.info("Desktop panel PR row opened")
-            NSWorkspace.shared.open(pr.htmlURL)
+            model?.open(pr)   // via the model so opening clears the "new" marker
         }
     }
 
@@ -246,8 +279,11 @@ final class DesktopPanel: NSObject {
         return label
     }
 
-    /// Centered big-glyph + caption for the empty/offline/signed-out body.
-    private func emptyState(_ symbol: String, _ color: NSColor, _ text: String) -> NSView {
+    /// Centered big-glyph + caption for the empty/offline/signed-out body, with
+    /// an optional action so the state isn't a dead end (signed-out needs a way
+    /// out that doesn't require finding the menubar icon).
+    private func emptyState(_ symbol: String, _ color: NSColor, _ text: String,
+                            actionTitle: String? = nil, actionSel: Selector? = nil) -> NSView {
         let cfg = NSImage.SymbolConfiguration(pointSize: 26, weight: .regular)
             .applying(.init(paletteColors: [color]))
         let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
@@ -262,6 +298,14 @@ final class DesktopPanel: NSObject {
         stack.alignment = .centerX
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
+
+        if let actionTitle, let actionSel {
+            let button = NSButton(title: actionTitle, target: self, action: actionSel)
+            button.bezelStyle = .rounded
+            button.controlSize = .regular
+            stack.addArrangedSubview(button)
+            stack.setCustomSpacing(14, after: label)
+        }
 
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -289,17 +333,13 @@ final class DesktopPanel: NSObject {
 
     // MARK: - Content
 
+    /// Shares `AppStatus.text` with the menu rather than keeping a second switch
+    /// — when the panel had its own, the two drifted (it still said
+    /// "Refreshing..." with three dots long after the menu said "Refreshing…").
     private func summaryText() -> String {
-        switch model.status {
-        case .signedOut: return "Not signed in"
-        case .loading: return "Refreshing..."
-        case .offline: return "Offline, cached"
-        case .rateLimited: return "Rate limited"
-        case .error: return "Needs attention"
-        default:
-            let need = model.needsMe.count
-            return need == 0 ? "All clear" : "\(need) need you"
-        }
+        let need = model.needsMe.count
+        return model.status.text(loaded: need == 0 ? "All clear" : "\(need) need you",
+                                 time: StatusController.shortTime.string(from:))
     }
 
     private func footerText() -> String {
@@ -307,7 +347,7 @@ final class DesktopPanel: NSObject {
         if let updated = model.lastUpdated {
             parts.append("Updated \(StatusController.shortTime.string(from: updated))")
         }
-        return parts.joined(separator: "  -  ")
+        return parts.joined(separator: "  ·  ")
     }
 
     private func applyTheme() {
@@ -338,7 +378,8 @@ private final class PRCardView: NSView {
     private let onOpen: () -> Void
     private var hovered = false
 
-    init(pr: PullRequest, palette: Palette?, onOpen: @escaping () -> Void) {
+    init(pr: PullRequest, palette: Palette?, freshness: PRFreshness?,
+         account: String?, onOpen: @escaping () -> Void) {
         self.onOpen = onOpen
         super.init(frame: .zero)
         wantsLayer = true
@@ -380,7 +421,15 @@ private final class PRCardView: NSView {
         let meta = NSStackView(views: [repo])
         meta.spacing = 6
         meta.translatesAutoresizingMaskIntoConstraints = false
-        if let reason = pr.waitReason { meta.addArrangedSubview(Self.reasonPill(reason, palette: palette)) }
+        if let account {
+            meta.addArrangedSubview(Self.pill(account, color: palette?.subtext ?? .secondaryLabelColor))
+        }
+        if let reason = pr.waitReason {
+            meta.addArrangedSubview(Self.pill(reason.panelLabel, color: reasonColor(reason, palette: palette)))
+        }
+        if let freshness, let text = freshness.pillLabel {
+            meta.addArrangedSubview(Self.pill(text, color: freshnessColor(freshness, palette: palette)))
+        }
 
         addSubview(chip); addSubview(title); addSubview(meta)
         NSLayoutConstraint.activate([
@@ -404,7 +453,9 @@ private final class PRCardView: NSView {
 
         toolTip = "\(pr.repoFullName)#\(pr.number)\n\(pr.title)"
         setAccessibilityRole(.button)
-        setAccessibilityLabel("\(pr.repoFullName) number \(pr.number), \(pr.title)")
+        let extra = [account, pr.waitReason?.panelLabel, freshness?.pillLabel].compactMap { $0 }
+        setAccessibilityLabel(([("\(pr.repoFullName) number \(pr.number), \(pr.title)")] + extra)
+            .joined(separator: ", "))
         updateBackground()
     }
     required init?(coder: NSCoder) { fatalError("not from a nib") }
@@ -412,12 +463,20 @@ private final class PRCardView: NSView {
     private func updateBackground() {
         layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(hovered ? 0.11 : 0.06).cgColor
     }
-    override func mouseUp(with event: NSEvent) { onOpen() }
+    /// Only a release INSIDE the card opens it — press, drag off, release must
+    /// cancel like any other button.
+    override func mouseUp(with event: NSEvent) {
+        guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onOpen()
+    }
     // Whole card is one click target — without this, the title/repo NSTextField
     // labels return themselves from hitTest and swallow the click.
     override func hitTest(_ point: NSPoint) -> NSView? {
         bounds.contains(convert(point, from: superview)) ? self : nil
     }
+    // The card claims the .button a11y role, so it must answer a VoiceOver press.
+    override func accessibilityPerformPress() -> Bool { onOpen(); return true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
@@ -427,22 +486,16 @@ private final class PRCardView: NSView {
     override func mouseEntered(with e: NSEvent) { hovered = true; updateBackground() }
     override func mouseExited(with e: NSEvent) { hovered = false; updateBackground() }
 
-    /// Small tinted "why it waits" pill. ponytail: review/team use system accent
-    /// colors — the Catppuccin Palette has no blue/mauve to map them to.
-    private static func reasonPill(_ reason: WaitReason, palette: Palette?) -> NSView {
-        let color: NSColor
-        switch reason {
-        case .reviewRequested: color = .systemPurple
-        case .teamReview:      color = .systemBlue
-        case .ciFailing:       color = palette?.red ?? .systemRed
-        }
+    /// Small tinted pill — the card's one badge shape, used for the account, the
+    /// "why it waits" reason, and the freshness marker.
+    private static func pill(_ text: String, color: NSColor) -> NSView {
         let pill = NSView()
         pill.wantsLayer = true
         pill.layer?.cornerRadius = 7
         pill.layer?.backgroundColor = color.withAlphaComponent(0.16).cgColor
         pill.translatesAutoresizingMaskIntoConstraints = false
         pill.setContentHuggingPriority(.required, for: .horizontal)
-        let label = NSTextField(labelWithString: reason.panelLabel)
+        let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 10, weight: .semibold)
         label.textColor = color
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -457,12 +510,3 @@ private final class PRCardView: NSView {
     }
 }
 
-private extension WaitReason {
-    var panelLabel: String {
-        switch self {
-        case .reviewRequested: return "review"
-        case .teamReview: return "team"
-        case .ciFailing: return "CI"
-        }
-    }
-}

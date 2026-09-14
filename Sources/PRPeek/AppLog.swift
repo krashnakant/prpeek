@@ -10,17 +10,3 @@ enum AppLog {
     static let desktopPanel = Logger(subsystem: subsystem, category: "DesktopPanel")
     static let notifications = Logger(subsystem: subsystem, category: "Notifications")
 }
-
-extension AppStatus {
-    var logName: String {
-        switch self {
-        case .signedOut: return "signedOut"
-        case .authorizing: return "authorizing"
-        case .loading: return "loading"
-        case .loaded: return "loaded"
-        case .offline: return "offline"
-        case .rateLimited: return "rateLimited"
-        case .error: return "error"
-        }
-    }
-}

@@ -12,6 +12,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     private var window: NSWindow?
     private let searchField = NSSearchField()
     private let table = KeyTableView()
+    private let countLabel = NSTextField(labelWithString: "")
     private var results: [PullRequest] = []
 
     init(model: AppModel) { self.model = model; super.init() }
@@ -48,8 +49,12 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         searchField.action = #selector(openSelected)   // Enter in the field opens the top hit
         searchField.sendsWholeSearchString = false
 
+        countLabel.font = .systemFont(ofSize: 11)
+        countLabel.textColor = .secondaryLabelColor
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+
         table.headerView = nil
-        table.rowHeight = 22
+        table.rowHeight = 24   // fits the CI glyph the panel and menu also show
         table.addTableColumn(NSTableColumn(identifier: .init("pr")))
         table.dataSource = self
         table.delegate = self
@@ -66,12 +71,16 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
 
         let content = w.contentView!
         content.addSubview(searchField)
+        content.addSubview(countLabel)
         content.addSubview(scroll)
         NSLayoutConstraint.activate([
             searchField.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
             searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
-            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            countLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
+            countLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            countLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            scroll.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
             scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
@@ -88,6 +97,9 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
             "\($0.repoFullName)#\($0.number) \($0.title) \($0.author)".lowercased().contains(q)
         }
         table.reloadData()
+        countLabel.stringValue = results.isEmpty
+            ? (all.isEmpty ? "No PRs loaded" : "No matches")
+            : "\(results.count) of \(all.count)"
         if !results.isEmpty {
             table.selectRowIndexes([0], byExtendingSelection: false)
         }
@@ -99,12 +111,20 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         let id = NSUserInterfaceItemIdentifier("cell")
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView) ?? {
             let c = NSTableCellView()
+            let iv = NSImageView()
+            iv.imageScaling = .scaleProportionallyDown
+            iv.translatesAutoresizingMaskIntoConstraints = false
             let tf = NSTextField(labelWithString: "")
             tf.translatesAutoresizingMaskIntoConstraints = false
             tf.lineBreakMode = .byTruncatingTail
-            c.addSubview(tf); c.textField = tf
+            c.addSubview(iv); c.addSubview(tf)
+            c.imageView = iv; c.textField = tf
             NSLayoutConstraint.activate([
-                tf.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
+                iv.widthAnchor.constraint(equalToConstant: 13),
+                iv.heightAnchor.constraint(equalToConstant: 13),
+                iv.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
+                iv.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+                tf.leadingAnchor.constraint(equalTo: iv.trailingAnchor, constant: 7),
                 tf.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
                 tf.centerYAnchor.constraint(equalTo: c.centerYAnchor),
             ])
@@ -112,10 +132,37 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
             return c
         }()
         let pr = results[row]
-        let reason = pr.waitReason != nil ? "  ●" : ""
-        cell.textField?.stringValue = "\(pr.repoFullName)#\(pr.number)  \(pr.title)\(reason)"
-        cell.textField?.toolTip = pr.waitingOnMe ? "Waiting on you" : nil
+        cell.imageView?.image = ciImage(pr.ciState, palette: model.palette)
+        cell.textField?.attributedStringValue = Self.rowText(pr, palette: model.palette,
+                                                            freshness: model.freshness(pr),
+                                                            account: model.accountLabel(for: pr))
+        cell.textField?.toolTip = pr.waitReason.map { "Waiting on you — \($0.panelLabel)" }
         return cell
+    }
+
+    /// Same visual language as the panel card and the menu row: dimmed
+    /// repo#number, full-strength title, reason in its own color.
+    private static func rowText(_ pr: PullRequest, palette: Palette?,
+                                freshness: PRFreshness?, account: String?) -> NSAttributedString {
+        let dim = palette?.subtext ?? NSColor.secondaryLabelColor
+        let s = NSMutableAttributedString(string: "", attributes: [.foregroundColor: dim])
+        s.append(NSAttributedString(string: accountTag(account), attributes: [.foregroundColor: dim]))
+        s.append(NSAttributedString(string: "\(pr.repoFullName)#\(pr.number)  ",
+                                    attributes: [.foregroundColor: dim]))
+        s.append(NSAttributedString(string: pr.title,
+                                    attributes: [.foregroundColor: palette?.text ?? NSColor.labelColor]))
+        let tagFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        if let reason = pr.waitReason {
+            s.append(NSAttributedString(
+                string: "  \(reason.panelLabel)",
+                attributes: [.foregroundColor: reasonColor(reason, palette: palette), .font: tagFont]))
+        }
+        if let freshness, let text = freshness.pillLabel {
+            s.append(NSAttributedString(
+                string: "  \(text)",
+                attributes: [.foregroundColor: freshnessColor(freshness, palette: palette), .font: tagFont]))
+        }
+        return s
     }
 
     // Live filter as the user types.
@@ -124,10 +171,28 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         reload()
     }
 
+    /// Focus starts in the field, so Esc and ↑↓ have to work from there too —
+    /// NSSearchField otherwise eats Esc to clear the text and never closes.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        switch sel {
+        case #selector(NSResponder.cancelOperation(_:)):
+            hide(); return true
+        case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)):
+            guard !results.isEmpty else { return true }
+            let step = sel == #selector(NSResponder.moveDown(_:)) ? 1 : -1
+            let next = min(max(table.selectedRow + step, 0), results.count - 1)
+            table.selectRowIndexes([next], byExtendingSelection: false)
+            table.scrollRowToVisible(next)
+            return true
+        default:
+            return false
+        }
+    }
+
     @objc private func openSelected() {
         let row = table.selectedRow >= 0 ? table.selectedRow : (results.isEmpty ? -1 : 0)
         guard results.indices.contains(row) else { return }
-        NSWorkspace.shared.open(results[row].htmlURL)
+        model.open(results[row])   // via the model so opening clears the "new" marker
         hide()
     }
 }

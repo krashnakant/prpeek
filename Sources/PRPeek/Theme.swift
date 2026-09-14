@@ -32,10 +32,10 @@ enum Theme: String, CaseIterable {
     var palette: Palette? {
         switch self {
         case .system, .light, .dark: return nil
-        case .latte:     return Palette(text: "#4c4f69", subtext: "#6c6f85", green: "#40a02b", red: "#d20f39", yellow: "#df8e1d")
-        case .frappe:    return Palette(text: "#c6d0f5", subtext: "#a5adce", green: "#a6d189", red: "#e78284", yellow: "#e5c890")
-        case .macchiato: return Palette(text: "#cad3f5", subtext: "#a5adcb", green: "#a6da95", red: "#ed8796", yellow: "#eed49f")
-        case .mocha:     return Palette(text: "#cdd6f4", subtext: "#a6adc8", green: "#a6e3a1", red: "#f38ba8", yellow: "#f9e2af")
+        case .latte:     return Palette(text: "#4c4f69", subtext: "#6c6f85", green: "#40a02b", red: "#d20f39", yellow: "#df8e1d", blue: "#1e66f5", mauve: "#8839ef")
+        case .frappe:    return Palette(text: "#c6d0f5", subtext: "#a5adce", green: "#a6d189", red: "#e78284", yellow: "#e5c890", blue: "#8caaee", mauve: "#ca9ee6")
+        case .macchiato: return Palette(text: "#cad3f5", subtext: "#a5adcb", green: "#a6da95", red: "#ed8796", yellow: "#eed49f", blue: "#8aadf4", mauve: "#c6a0f6")
+        case .mocha:     return Palette(text: "#cdd6f4", subtext: "#a6adc8", green: "#a6e3a1", red: "#f38ba8", yellow: "#f9e2af", blue: "#89b4fa", mauve: "#cba6f7")
         }
     }
 
@@ -46,11 +46,13 @@ enum Theme: String, CaseIterable {
 }
 
 struct Palette {
-    let text, subtext, green, red, yellow: NSColor
-    init(text: String, subtext: String, green: String, red: String, yellow: String) {
+    let text, subtext, green, red, yellow, blue, mauve: NSColor
+    init(text: String, subtext: String, green: String, red: String, yellow: String,
+         blue: String, mauve: String) {
         self.text = NSColor(hex: text); self.subtext = NSColor(hex: subtext)
         self.green = NSColor(hex: green); self.red = NSColor(hex: red)
         self.yellow = NSColor(hex: yellow)
+        self.blue = NSColor(hex: blue); self.mauve = NSColor(hex: mauve)
     }
 }
 

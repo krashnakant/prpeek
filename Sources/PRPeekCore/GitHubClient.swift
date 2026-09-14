@@ -151,6 +151,50 @@ public actor GitHubClient {
         }
     }
 
+    // MARK: - Writes
+
+    /// The one write path (POST/PUT/PATCH). Deliberately NOT conditional: a
+    /// write's response is a result, not a resource to revalidate, so it never
+    /// touches the ETag cache. Shares `rawGet`'s status -> typed error mapping
+    /// so callers handle one error set, plus the 4xx cases only writes can hit.
+    @discardableResult
+    func rawWrite(method: String, path: String, body: [String: any Sendable]) async throws -> Data {
+        let url = baseURL.appending(path: path)
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, http) = try await transport.send(req)
+
+        switch http.statusCode {
+        case 200...299:
+            return data
+        case 401:
+            throw GitHubError.unauthorized
+        case 403, 429:
+            throw Self.rateLimitOrForbidden(http)
+        case 404:
+            // GitHub hides writes you lack permission for behind a 404 rather than
+            // a 403 — same remedy as a plain forbidden, so same case.
+            throw GitHubError.forbidden
+        case 400...499:
+            throw GitHubError.rejected(status: http.statusCode, message: Self.apiMessage(data))
+        default:
+            throw GitHubError.server(status: http.statusCode)
+        }
+    }
+
+    /// GitHub explains a refused write in `{"message": "..."}`. Worth surfacing
+    /// verbatim — "Head branch was modified" beats any sentence we'd invent.
+    static func apiMessage(_ data: Data) -> String {
+        struct Body: Decodable { let message: String }
+        return (try? JSONDecoder().decode(Body.self, from: data))?.message ?? ""
+    }
+
     // MARK: - Helpers
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data, url: URL) throws -> T {

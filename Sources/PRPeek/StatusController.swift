@@ -11,7 +11,10 @@ final class StatusController: NSObject {
     private let panel: DesktopPanel
     private let search: SearchWindow
     private let sectionCap = 15
-    /// PR id -> its live submenu(s), rebuilt each render. A self-authored failing
+    /// One truncation budget for every menu row that elides (commit subject,
+    /// comment snippet, error text) — the untruncated text is in the tooltip.
+    private static let snippetLimit = 64
+    /// PR key -> its live submenu(s), rebuilt each render. A self-authored failing
     /// PR shows in both "Needs me" and "Mine", so one id can have two submenus;
     /// a finished comment/commit load must repopulate all of them.
     private var submenus: [String: [PRSubmenu]] = [:]
@@ -66,7 +69,7 @@ final class StatusController: NSObject {
 
         if signedOut {
             menu.addItem(action("Sign in with GitHub…", #selector(signIn), symbol: "person.crop.circle"))
-            menu.addItem(action("Paste token…", #selector(pasteToken), symbol: "key.fill"))
+            menu.addItem(action("Add account with token…", #selector(pasteToken), symbol: "key.fill"))
             menu.addItem(.separator())
             menu.addItem(desktopPanelItem())
             menu.addItem(preferencesItem())
@@ -74,12 +77,14 @@ final class StatusController: NSObject {
             // F3: "All" was a superset of the first two -> every PR shown up to 3×.
             // Remaining sections show the remainder so each PR appears once.
             // Muted PRs live only in the Muted section (excluded from the rest).
-            let mutedIDs = Set(model.muted.map(\.id))
-            let needIDs = Set(model.needsMe.map(\.id))           // needsMe already excludes muted
-            let mine = model.mine.filter { !mutedIDs.contains($0.id) }
-            let mineIDs = Set(mine.map(\.id))
+            // Keyed on `key`, not `id`: two accounts can carry the same node_id,
+            // and one account's PR would then hide the other's.
+            let mutedIDs = Set(model.muted.map(\.key))
+            let needIDs = Set(model.needsMe.map(\.key))          // needsMe already excludes muted
+            let mine = model.mine.filter { !mutedIDs.contains($0.key) }
+            let mineIDs = Set(mine.map(\.key))
             let others = model.all.filter {
-                !needIDs.contains($0.id) && !mineIDs.contains($0.id) && !mutedIDs.contains($0.id)
+                !needIDs.contains($0.key) && !mineIDs.contains($0.key) && !mutedIDs.contains($0.key)
             }
             section(menu, "Needs me", model.needsMe)
             section(menu, "Mine", mine)
@@ -93,7 +98,7 @@ final class StatusController: NSObject {
             menu.addItem(desktopPanelItem())
             menu.addItem(preferencesItem())
             menu.addItem(.separator())
-            menu.addItem(action("Sign out", #selector(signOut), symbol: "rectangle.portrait.and.arrow.right"))
+            menu.addItem(accountsItem())
         }
         menu.addItem(action("Quit PRPeek", #selector(quit), key: "q", symbol: "power"))
 
@@ -106,18 +111,9 @@ final class StatusController: NSObject {
     }
 
     private func statusRow() -> NSMenuItem {
-        let text: String
-        switch model.status {
-        case .signedOut(let reason): text = reason ?? "Not signed in"
-        case .authorizing(let code): text = "Authorizing — code \(code) (copied)"
-        case .loading: text = "Refreshing…"
-        case .offline: text = "Offline — showing cached"
-        case .rateLimited(let until):
-            text = "Rate limited" + (until.map { " until \(Self.time($0))" } ?? "")
-        case .error(let m): text = "Error: \(m.prefix(60))"
-        case .loaded:
-            text = model.lastUpdated.map { "Updated \(Self.time($0))" } ?? "Up to date"
-        }
+        let text = model.status.text(
+            loaded: model.lastUpdated.map { "Updated \(Self.time($0))" } ?? "Up to date",
+            time: Self.time, errorLimit: Self.snippetLimit)
         let i = NSMenuItem(title: text, action: nil, keyEquivalent: "")
         i.isEnabled = false
         return i
@@ -153,27 +149,34 @@ final class StatusController: NSObject {
         menu.addItem(header)
 
         if prs.isEmpty {
-            let empty = NSMenuItem(title: "   none", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: "none", action: nil, keyEquivalent: "")
             empty.isEnabled = false
+            empty.indentationLevel = 1
             menu.addItem(empty)
         }
         for pr in prs.prefix(sectionCap) {
-            // Surface WHY it needs me, inline + on hover (only set for waiting PRs).
+            // Surface WHY it needs me and HOW FRESH it is, inline + on hover.
+            let freshness = model.freshness(pr)
             let suffix = pr.waitReason.map { "  —  \($0.short)" } ?? ""
-            let i = NSMenuItem(title: "\(pr.repoFullName)#\(pr.number)  \(pr.title)\(suffix)",
+            let fresh = freshness?.pillLabel.map { "  ·  \($0)" } ?? ""
+            // Account prefix only once more than one identity is signed in.
+            let account = accountTag(model.accountLabel(for: pr))
+            let i = NSMenuItem(title: "\(account)\(pr.repoFullName)#\(pr.number)  \(pr.title)\(suffix)\(fresh)",
                                action: nil, keyEquivalent: "")   // submenu = expand; "Open" lives inside it
-            i.toolTip = pr.waitReason?.long
+            i.toolTip = [pr.waitReason?.long, freshness?.long]
+                .compactMap { $0 }.joined(separator: "\n")
             tint(i) { $0.text }
             i.image = ciImage(pr.ciState, palette: palette)   // semantic SF Symbol, not emoji (F2)
             let sub = PRSubmenu(pr: pr)
             sub.delegate = self                  // menuWillOpen -> lazy-load + populate
             sub.addItem(disabledRow("PR details…"))   // placeholder so the arrow shows; replaced on open
-            submenus[pr.id, default: []].append(sub)
+            submenus[pr.key, default: []].append(sub)
             i.submenu = sub
             menu.addItem(i)
         }
         if prs.count > sectionCap {
-            let more = action("   +\(prs.count - sectionCap) more on GitHub…", #selector(openAll))
+            let more = action("+\(prs.count - sectionCap) more on GitHub…", #selector(openAll))
+            more.indentationLevel = 1
             menu.addItem(more)
         }
     }
@@ -181,7 +184,10 @@ final class StatusController: NSObject {
     // MARK: actions
     @objc private func openPR(_ sender: NSMenuItem) {
         AppLog.statusMenu.info("Open PR action selected")
-        if let url = sender.representedObject as? URL { NSWorkspace.shared.open(url) }
+        // A PR opens through the model so it counts as seen; plain URLs (a
+        // commit, a review comment) just open.
+        if let pr = sender.representedObject as? PullRequest { model.open(pr) }
+        else if let url = sender.representedObject as? URL { NSWorkspace.shared.open(url) }
     }
     @objc private func openAll() {
         AppLog.statusMenu.info("Open GitHub pulls action selected")
@@ -195,9 +201,57 @@ final class StatusController: NSObject {
         AppLog.statusMenu.info("Search PRs action selected")
         search.show()
     }
-    @objc private func signOut() {
-        AppLog.statusMenu.info("Sign out action selected")
-        model.signOut()
+    // MARK: accounts
+
+    /// "Accounts ▸ {one row per identity, Add…, Sign out of all}". Each account
+    /// row shows its own status, so a rate-limited or rejected account is
+    /// visible without hunting through the merged PR list.
+    private func accountsItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Accounts", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("person.2")
+        let sub = NSMenu()
+        for session in model.sessions {
+            let row = NSMenuItem(title: session.displayName, action: nil, keyEquivalent: "")
+            row.image = Self.menuIcon("person.crop.circle")
+            let detail = NSMenu()
+            detail.addItem(disabledRow(session.account.displayHost))
+            detail.addItem(disabledRow(session.status.text(loaded: "OK", time: Self.time, errorLimit: Self.snippetLimit)))
+            detail.addItem(.separator())
+            let remove = NSMenuItem(title: "Sign out of this account",
+                                    action: #selector(removeAccount(_:)), keyEquivalent: "")
+            remove.target = self
+            remove.representedObject = session.account.id
+            remove.image = Self.menuIcon("rectangle.portrait.and.arrow.right")
+            detail.addItem(remove)
+            row.submenu = detail
+            sub.addItem(row)
+        }
+        sub.addItem(.separator())
+        let add = NSMenuItem(title: "Add account with token…", action: #selector(pasteToken), keyEquivalent: "")
+        add.target = self; add.image = Self.menuIcon("plus")
+        sub.addItem(add)
+        if !AppModel.clientID.isEmpty {
+            let device = NSMenuItem(title: "Add github.com account…", action: #selector(signIn), keyEquivalent: "")
+            device.target = self; device.image = Self.menuIcon("person.crop.circle.badge.plus")
+            sub.addItem(device)
+        }
+        sub.addItem(.separator())
+        let all = NSMenuItem(title: "Sign out of all", action: #selector(signOutAll), keyEquivalent: "")
+        all.target = self; all.image = Self.menuIcon("rectangle.portrait.and.arrow.right")
+        sub.addItem(all)
+        parent.submenu = sub
+        return parent
+    }
+
+    @objc private func removeAccount(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        AppLog.statusMenu.info("Remove account action selected")
+        model.removeAccount(id)
+    }
+
+    @objc private func signOutAll() {
+        AppLog.statusMenu.info("Sign out of all accounts action selected")
+        model.signOutAll()
     }
     @objc private func quit() {
         AppLog.statusMenu.info("Quit action selected")
@@ -237,28 +291,6 @@ final class StatusController: NSObject {
         guard let pr = sender.representedObject as? PullRequest else { return }
         AppLog.statusMenu.info("Unmute action selected")
         model.unmute(pr)
-    }
-
-    // MARK: GitHub Enterprise host
-    @objc private func setHost() {
-        AppLog.statusMenu.info("GitHub host settings action selected")
-        let alert = NSAlert()
-        alert.messageText = "GitHub Enterprise host"
-        alert.informativeText = "Hostname only, e.g. github.acme.com. Leave blank for github.com. "
-            + "Use a fine-grained PAT via Paste token for GHES. Restart PRPeek to apply."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.stringValue = model.githubHost
-        field.placeholderString = "github.com"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        model.setGitHubHost(field.stringValue)
-        let note = NSAlert()
-        note.messageText = "Restart required"
-        note.informativeText = "Quit and reopen PRPeek for the host change to take effect."
-        note.runModal()
     }
 
     // MARK: repo filter
@@ -331,7 +363,8 @@ final class StatusController: NSObject {
         })
         sub.addItem(intervalItem())
         sub.addItem(themeItem())
-        sub.addItem(action("GitHub host…", #selector(setHost), symbol: "server.rack"))
+        // The GHES host moved onto the account itself (Accounts ▸ Add account),
+        // so there's no global host setting to expose here any more.
         parent.submenu = sub
         return parent
     }
@@ -398,9 +431,11 @@ final class StatusController: NSObject {
         let open = NSMenuItem(title: "Open PR in browser", action: #selector(openPR(_:)), keyEquivalent: "")
         open.target = self
         open.image = Self.menuIcon("arrow.up.right.square")
-        open.representedObject = sub.pr.htmlURL
+        open.representedObject = sub.pr
         sub.addItem(open)
         sub.addItem(muteControl(for: sub.pr))
+        if let reReview = reReviewControl(for: sub.pr) { sub.addItem(reReview) }
+        if let merge = mergeControl(for: sub.pr) { sub.addItem(merge) }
         sub.addItem(.separator())
 
         // Review comments
@@ -408,8 +443,13 @@ final class StatusController: NSObject {
             if comments.isEmpty {
                 sub.addItem(disabledRow("No review comments"))
             } else {
-                sub.addItem(disabledRow("\(comments.count) review comment\(comments.count == 1 ? "" : "s")"))
-                for c in comments { sub.addItem(commentItem(c)) }
+                sub.addItem(disabledRow("\(comments.count) review comment\(comments.count == 1 ? "" : "s")  ·  ⌥ to reply"))
+                for c in comments {
+                    let row = commentItem(c)
+                    row.keyEquivalentModifierMask = []   // must differ from the alternate's ⌥
+                    sub.addItem(row)
+                    sub.addItem(replyItem(c, on: sub.pr))
+                }
             }
         } else {
             sub.addItem(disabledRow(model.isLoadingComments(sub.pr) ? "Loading comments…" : "Review comments"))
@@ -431,7 +471,7 @@ final class StatusController: NSObject {
     }
 
     private func commitItem(_ c: Commit) -> NSMenuItem {
-        let title = "\(c.message.prefix(56))  ·  \(c.shortSHA)  ·  \(c.author) \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
+        let title = "\(c.message.prefix(Self.snippetLimit))  ·  \(c.shortSHA)  ·  \(c.author) \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
         // Hover summary: full (untruncated) subject + metadata.
         let tip = "\(c.message)\n\(c.shortSHA) · \(c.author) · \(Self.age.localizedString(for: c.date, relativeTo: Date()))"
         return linkRow(title: title, image: ciImage(c.ciState, palette: palette), url: c.htmlURL, toolTip: tip)   // per-commit check-runs
@@ -446,7 +486,7 @@ final class StatusController: NSObject {
         let loc = c.location.map { " (\($0))" } ?? ""
         // Hover summary: author + verdict + location, then the full comment body.
         let tip = "\(c.author) · \(c.verdict.rawValue)\(loc)\n\n\(c.body)"
-        return linkRow(title: "\(c.author): \(snippet.prefix(64))\(loc)", image: verdictImage(c.verdict),
+        return linkRow(title: "\(c.author): \(snippet.prefix(Self.snippetLimit))\(loc)", image: verdictImage(c.verdict),
                        url: c.htmlURL, toolTip: tip)
     }
 
@@ -463,8 +503,9 @@ final class StatusController: NSObject {
     }
 
     private func disabledRow(_ title: String) -> NSMenuItem {
-        let i = NSMenuItem(title: "   \(title)", action: nil, keyEquivalent: "")
+        let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         i.isEnabled = false
+        i.indentationLevel = 1
         return i
     }
 
@@ -485,33 +526,173 @@ final class StatusController: NSObject {
         model.signInWithDeviceFlow()
     }
 
+    /// Add one account: name, host, token. This is also the only way in for a
+    /// GitHub Enterprise account — device flow would need an OAuth App registered
+    /// on that host, which a distributed build has no client id for.
     @objc private func pasteToken() {
-        AppLog.statusMenu.info("Paste token action selected")
+        AppLog.statusMenu.info("Add account action selected")
         let alert = NSAlert()
-        alert.messageText = "Paste a GitHub token"
+        alert.messageText = "Add a GitHub account"
         // Least privilege: a read-only fine-grained PAT is preferred over "Sign in"
-        // (device flow), whose classic `repo` scope also grants write. PRPeek only reads.
+        // (device flow), whose classic `repo` scope grants write wholesale. Watching
+        // needs no write at all — only merge/re-review/reply do.
         alert.informativeText = "Recommended: a fine-grained PAT (read-only) — "
             + "Pull requests: Read, Contents: Read, and Org ▸ Members: Read (for team review). "
-            + "A classic PAT works too but needs repo + read:org (grants write)."
+            + "Add Pull requests: Write only if you want to merge, ask for a re-review, or reply "
+            + "from the menu. A classic PAT works too but needs repo + read:org (grants write)."
+
+        let name = NSTextField(frame: NSRect(x: 0, y: 56, width: 300, height: 24))
+        name.placeholderString = "Name (e.g. Work)"
+        let host = NSTextField(frame: NSRect(x: 0, y: 28, width: 300, height: 24))
+        host.placeholderString = "github.com (or github.acme.com for Enterprise)"
         // F4: a token is a secret — secure field (masked, no echo), focused so
         // the user can paste immediately.
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.placeholderString = "ghp_… or github_pat_…"
+        let token = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        token.placeholderString = "ghp_… or github_pat_…"
         // ⌘V works via the hidden Edit menu (main.swift). Belt-and-braces:
         // prefill from the clipboard if it looks like a token, plus an explicit
         // Paste button for mouse-only users.
         let clip = NSPasteboard.general.string(forType: .string) ?? ""
-        if clip.hasPrefix("ghp_") || clip.hasPrefix("github_pat_") { field.stringValue = clip }
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
+        if clip.hasPrefix("ghp_") || clip.hasPrefix("github_pat_") { token.stringValue = clip }
+
+        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 80))
+        fields.addSubview(name); fields.addSubview(host); fields.addSubview(token)
+        alert.accessoryView = fields
+        alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Paste from Clipboard")
         alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
+        alert.window.initialFirstResponder = token
         switch alert.runModal() {
-        case .alertFirstButtonReturn:  model.pastePAT(field.stringValue)              // Save (typed or prefilled)
-        case .alertSecondButtonReturn: model.pastePAT(NSPasteboard.general.string(forType: .string) ?? "")  // Paste
+        case .alertFirstButtonReturn:
+            model.addAccount(label: name.stringValue, host: host.stringValue, token: token.stringValue)
+        case .alertSecondButtonReturn:
+            model.addAccount(label: name.stringValue, host: host.stringValue,
+                             token: NSPasteboard.general.string(forType: .string) ?? "")
         default: break                                                                // Cancel
+        }
+    }
+
+    // MARK: write actions (merge / re-review / reply)
+    // The only menu rows that change anything on GitHub. Each confirms first,
+    // hands off to AppModel, and shows whatever sentence comes back on failure.
+
+    /// Both halves a write needs, carried through `representedObject`.
+    private struct MergeTarget { let pr: PullRequest; let method: MergeMethod }
+    private struct ReplyTarget { let pr: PullRequest; let comment: ReviewComment }
+
+    /// "Merge ▸ {Merge commit, Squash, Rebase}". Omitted (not disabled) when the
+    /// PR can't be merged from here: menu items in an autoenabled menu ignore
+    /// `isEnabled`, and a draft or an unknown head SHA would only earn a 405.
+    private func mergeControl(for pr: PullRequest) -> NSMenuItem? {
+        guard !pr.isDraft, pr.headSHA != nil else { return nil }
+        let parent = NSMenuItem(title: "Merge", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("arrow.triangle.merge")
+        let sub = NSMenu()
+        for method in MergeMethod.allCases {
+            let i = NSMenuItem(title: method.label, action: #selector(mergePR(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = MergeTarget(pr: pr, method: method)
+            sub.addItem(i)
+        }
+        parent.submenu = sub
+        return parent
+    }
+
+    /// "Request re-review ▸ {people who already reviewed}". Only on your own PRs,
+    /// and only once the thread has loaded — the names come from it, not a fetch.
+    private func reReviewControl(for pr: PullRequest) -> NSMenuItem? {
+        guard pr.isMine else { return nil }
+        let logins = model.pastReviewers(of: pr)
+        guard !logins.isEmpty else { return nil }
+        let parent = NSMenuItem(title: "Request re-review", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("arrow.clockwise.circle")
+        let sub = NSMenu()
+        for login in logins {
+            let i = NSMenuItem(title: login, action: #selector(requestReReview(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = ReReviewTarget(pr: pr, login: login)
+            sub.addItem(i)
+        }
+        parent.submenu = sub
+        return parent
+    }
+    private struct ReReviewTarget { let pr: PullRequest; let login: String }
+
+    /// The ⌥-variant of the comment row above it: click opens the comment in the
+    /// browser, ⌥-click replies. An alternate item is the native way to add a
+    /// second action without doubling the visible rows on a 30-comment thread.
+    private func replyItem(_ c: ReviewComment, on pr: PullRequest) -> NSMenuItem {
+        let i = NSMenuItem(title: "Reply to \(c.author)…", action: #selector(replyToComment(_:)), keyEquivalent: "")
+        i.target = self
+        i.keyEquivalentModifierMask = .option
+        i.isAlternate = true
+        i.image = Self.menuIcon("arrowshape.turn.up.left")
+        i.representedObject = ReplyTarget(pr: pr, comment: c)
+        return i
+    }
+
+    @objc private func mergePR(_ sender: NSMenuItem) {
+        guard let t = sender.representedObject as? MergeTarget else { return }
+        AppLog.statusMenu.info("Merge action selected method=\(t.method.rawValue, privacy: .public)")
+        let alert = NSAlert()
+        alert.messageText = "\(t.method.label) #\(t.pr.number)?"
+        // Name the head SHA: the merge is pinned to it, so it's what actually lands.
+        alert.informativeText = "\(t.pr.repoFullName) — \(t.pr.title)\n\n"
+            + "Merges \(t.pr.headSHA?.prefix(7) ?? "the head commit") as seen at the last refresh. "
+            + "PRPeek can't undo this."
+        alert.addButton(withTitle: t.method.label)
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        run { await self.model.merge(t.pr, method: t.method) }
+    }
+
+    @objc private func requestReReview(_ sender: NSMenuItem) {
+        guard let t = sender.representedObject as? ReReviewTarget else { return }
+        AppLog.statusMenu.info("Re-review action selected")
+        run { await self.model.requestReview(t.pr, from: t.login) }
+    }
+
+    @objc private func replyToComment(_ sender: NSMenuItem) {
+        guard let t = sender.representedObject as? ReplyTarget else { return }
+        AppLog.statusMenu.info("Reply action selected")
+        let alert = NSAlert()
+        alert.messageText = "Reply to \(t.comment.author)"
+        let quoted = t.comment.body.prefix(Self.replyQuoteLimit)
+        alert.informativeText = t.comment.inlineCommentID == nil
+            ? "\(quoted)\n\nThis posts as a new PR comment — GitHub has no reply endpoint for a review."
+            : "\(quoted)"
+
+        // ponytail: one wrapping NSTextField, so Return sends rather than making a
+        // newline. Swap in an NSTextView in a scroll view if multi-line replies matter.
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 68))
+        field.placeholderString = "Your reply (Markdown)"
+        field.usesSingleLineMode = false
+        field.cell?.wraps = true
+        field.lineBreakMode = .byWordWrapping
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Reply")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let body = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+        run { await self.model.reply(to: t.comment, on: t.pr, body: body) }
+    }
+
+    private static let replyQuoteLimit = 240
+
+    /// Fire a write and surface its failure sentence. Nothing to show on success —
+    /// the refresh AppModel kicks repaints the menu.
+    private func run(_ action: @escaping @MainActor () async -> String?) {
+        Task { @MainActor in
+            guard let message = await action() else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "GitHub turned that down"
+            alert.informativeText = message
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
         }
     }
 
@@ -549,6 +730,7 @@ extension StatusController: NSMenuDelegate {
         openMenus += 1
         if let sub = menu as? PRSubmenu {
             AppLog.statusMenu.debug("PR submenu opened")
+            model.markSeen(sub.pr)
             model.loadComments(for: sub.pr)
             model.loadCommits(for: sub.pr)
             populate(sub)   // reflect "Loading…" immediately; onSubmenuReload repopulates with content
@@ -566,6 +748,17 @@ extension StatusController: NSMenuDelegate {
             pendingRender = false
             AppLog.statusMenu.debug("Flushing deferred menu render")
             render()
+        }
+    }
+}
+
+/// Menu wording for a merge method — display text, so it lives with the menu.
+private extension MergeMethod {
+    var label: String {
+        switch self {
+        case .merge:  return "Merge commit"
+        case .squash: return "Squash and merge"
+        case .rebase: return "Rebase and merge"
         }
     }
 }

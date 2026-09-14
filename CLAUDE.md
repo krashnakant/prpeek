@@ -31,11 +31,17 @@ If you can write it without importing AppKit, it belongs in Core (and gets a tes
 | `GitHubClient.swift` | Conditional-request engine (ETag/304) all endpoints ride. |
 | `GitHubError.swift` | Typed errors; failure-state UI keys on these. |
 | `Auth.swift` | `GET /user` — drives "waiting on me". |
+| `Accounts.swift` | One signed-in identity; Keychain entry name, GHES host. |
+| `AccountSession.swift` | One account's token, client, engine, viewer, caches. |
+| `AppStatus.swift` | Status enum + cross-account aggregate + its display text. |
+| `PerPRLazyCache.swift` | Per-PR fetch-once cache with in-flight dedup. |
 | `Search.swift` | `/search/issues` wire wrapper. |
 | `Classifier.swift` | `GET /pulls/{n}` — richer per-PR detail. |
 | `Commits.swift` / `Models.swift` | CI/checks rollup for a PR's head commit. |
 | `ReviewComments.swift` | Reviewer verdicts from PR review `state`. |
+| `Writes.swift` | The only three calls that change GitHub: merge, re-review, reply. |
 | `RefreshEngine.swift` | ONE coalesced refresh pass (not per-repo timers). |
+| `Freshness.swift` | new / seen / stale / re-review, from local + API signals. |
 | `Notifications.swift` | Diffs previous pass vs current to decide what fires. |
 | `Concurrency.swift` | Order-preserving concurrent map with in-flight cap. |
 | `JSONStore.swift` | Atomic JSON persistence for `PRPeekState`. |
@@ -44,7 +50,7 @@ If you can write it without importing AppKit, it belongs in Core (and gets a tes
 
 | File | Owns |
 |------|------|
-| `AppModel.swift` | The brain — state, refresh loop, auth, lifecycle wiring. |
+| `AppModel.swift` | The brain — fans a refresh across accounts, merges, lifecycle. |
 | `StatusController.swift` | `NSStatusItem` — paints badge, rebuilds menu. Largest file; use its `MARK:` anchors. |
 | `DesktopPanel.swift` | Floating PRPeek panel with native controls. |
 | `SearchWindow.swift` | Keyboard-first search across all loaded PRs. |
@@ -52,11 +58,18 @@ If you can write it without importing AppKit, it belongs in Core (and gets a tes
 | `BadgeRenderer.swift` | Menubar icon (color path, `isTemplate=false`). |
 | `Theme.swift` | System/Light/Dark → `NSApp.appearance`. |
 | `LifecycleMonitor.swift` | Sleep/wake + network reachability. |
-| `PerPRLazyCache.swift` | Per-PR fetch-once cache with in-flight dedup. |
 
 ## Conventions
 
 - Top of each source file carries a `///` doc line stating its job — keep it accurate when you change the file.
 - Big files use `// MARK:` section anchors — read those first to locate code before grepping.
 - Deliberate simplifications are marked with `ponytail:` comments naming the ceiling.
+- Per-PR maps (mutes, seen, waiting-since, notification dedup) key on
+  `PullRequest.key` (`accountID:nodeID`), never the bare `id` — node_ids only
+  collide-free within one host. The one exception is `RefreshEngine`'s
+  carry-forward map, which runs before `accountID` is stamped; it says so.
+- `PRPeekState` owns its per-PR maps' whole lifecycle — `migrate`, `prune`,
+  `forget(account:)`. The key format never leaves `Models.swift`.
+- Cache format changes bump `PRPeekState.currentSchema` and add a step to
+  `migrate`; `JSONStore` only quarantines a cache from a NEWER build.
 - Update `README.md` when you change user-facing behavior, install steps, or features.

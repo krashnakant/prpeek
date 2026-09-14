@@ -19,8 +19,10 @@ public struct JSONStore: Sendable {
         guard let data = try? Data(contentsOf: url) else { return .empty }
         do {
             let state = try JSONDecoder.github.decode(PRPeekState.self, from: data)
-            guard state.schemaVersion == PRPeekState.currentSchema else {
-                // future: migrate. today: recover (drop cache, keep nothing risky).
+            // Older caches are migrated by the caller (`PRPeekState.migrate`), which
+            // keys off `schemaVersion`. A NEWER one was written by a build we don't
+            // understand — that's the only unrecoverable case.
+            guard state.schemaVersion <= PRPeekState.currentSchema else {
                 quarantine(reason: "schema \(state.schemaVersion)")
                 return .empty
             }

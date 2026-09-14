@@ -253,7 +253,7 @@ final class DesktopPanel: NSObject {
     }
 
     private func prRow(_ pr: PullRequest) -> NSView {
-        PRCardView(pr: pr, palette: model.palette,
+        PRCardView(pr: pr, model: model, palette: model.palette,
                    freshness: model.freshness(pr),
                    account: model.accountLabel(for: pr)) { [weak model] in
             AppLog.desktopPanel.info("Desktop panel PR row opened")
@@ -375,11 +375,15 @@ private final class DraggableHeaderView: NSView {
 /// (repo#number + a "why it waits" pill). Clickable (opens the PR) with a hover
 /// highlight — a plain NSButton can't host this two-line layout cleanly.
 private final class PRCardView: NSView {
+    private let pr: PullRequest
+    private weak var model: AppModel?
     private let onOpen: () -> Void
     private var hovered = false
 
-    init(pr: PullRequest, palette: Palette?, freshness: PRFreshness?,
+    init(pr: PullRequest, model: AppModel?, palette: Palette?, freshness: PRFreshness?,
          account: String?, onOpen: @escaping () -> Void) {
+        self.pr = pr
+        self.model = model
         self.onOpen = onOpen
         super.init(frame: .zero)
         wantsLayer = true
@@ -485,6 +489,74 @@ private final class PRCardView: NSView {
     }
     override func mouseEntered(with e: NSEvent) { hovered = true; updateBackground() }
     override func mouseExited(with e: NSEvent) { hovered = false; updateBackground() }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let model else { return nil }
+        let menu = NSMenu()
+        let open = NSMenuItem(title: "Open in Browser", action: #selector(contextOpen), keyEquivalent: "")
+        open.target = self
+        open.image = menuIcon("arrow.up.right.square")
+        menu.addItem(open)
+
+        let copyURL = NSMenuItem(title: "Copy URL", action: #selector(contextCopyURL), keyEquivalent: "")
+        copyURL.target = self
+        copyURL.image = menuIcon("doc.on.doc")
+        menu.addItem(copyURL)
+
+        let copyTitle = NSMenuItem(title: "Copy Title", action: #selector(contextCopyTitle), keyEquivalent: "")
+        copyTitle.target = self
+        copyTitle.image = menuIcon("text.alignleft")
+        menu.addItem(copyTitle)
+
+        menu.addItem(.separator())
+
+        if model.isMuted(pr) {
+            let unmute = NSMenuItem(title: "Unmute", action: #selector(contextUnmute), keyEquivalent: "")
+            unmute.target = self
+            unmute.image = menuIcon("bell")
+            menu.addItem(unmute)
+        } else {
+            let snooze = NSMenuItem(title: "Snooze", action: nil, keyEquivalent: "")
+            snooze.image = menuIcon("moon.zzz")
+            let sub = NSMenu()
+            let s1 = NSMenuItem(title: "1 hour", action: #selector(contextSnooze1h), keyEquivalent: "")
+            s1.target = self
+            sub.addItem(s1)
+            let s4 = NSMenuItem(title: "4 hours", action: #selector(contextSnooze4h), keyEquivalent: "")
+            s4.target = self
+            sub.addItem(s4)
+            let sUp = NSMenuItem(title: "Until it updates", action: #selector(contextSnoozeUntilUpdated), keyEquivalent: "")
+            sUp.target = self
+            sub.addItem(sUp)
+            snooze.submenu = sub
+            menu.addItem(snooze)
+        }
+        return menu
+    }
+
+    @objc private func contextOpen() {
+        onOpen()
+    }
+    @objc private func contextCopyURL() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(pr.htmlURL.absoluteString, forType: .string)
+    }
+    @objc private func contextCopyTitle() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(pr.title, forType: .string)
+    }
+    @objc private func contextUnmute() {
+        model?.unmute(pr)
+    }
+    @objc private func contextSnooze1h() {
+        model?.mute(pr, for: 3600)
+    }
+    @objc private func contextSnooze4h() {
+        model?.mute(pr, for: 14400)
+    }
+    @objc private func contextSnoozeUntilUpdated() {
+        model?.muteUntilUpdated(pr)
+    }
 
     /// Small tinted pill — the card's one badge shape, used for the account, the
     /// "why it waits" reason, and the freshness marker.

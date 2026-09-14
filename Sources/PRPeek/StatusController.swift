@@ -189,6 +189,16 @@ final class StatusController: NSObject {
         if let pr = sender.representedObject as? PullRequest { model.open(pr) }
         else if let url = sender.representedObject as? URL { NSWorkspace.shared.openSafeWebURL(url) }
     }
+    @objc private func copyPRURL(_ sender: NSMenuItem) {
+        AppLog.statusMenu.info("Copy PR URL action selected")
+        if let pr = sender.representedObject as? PullRequest {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(pr.htmlURL.absoluteString, forType: .string)
+        } else if let url = sender.representedObject as? URL {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        }
+    }
     @objc private func openAll() {
         AppLog.statusMenu.info("Open GitHub pulls action selected")
         let ghesHost = model.sessions.first(where: { !$0.account.host.isEmpty })?.account.host ?? ""
@@ -435,6 +445,13 @@ final class StatusController: NSObject {
         open.image = Self.menuIcon("arrow.up.right.square")
         open.representedObject = sub.pr
         sub.addItem(open)
+
+        let copyURL = NSMenuItem(title: "Copy URL", action: #selector(copyPRURL(_:)), keyEquivalent: "")
+        copyURL.target = self
+        copyURL.image = Self.menuIcon("doc.on.doc")
+        copyURL.representedObject = sub.pr
+        sub.addItem(copyURL)
+
         sub.addItem(muteControl(for: sub.pr))
         if let reReview = reReviewControl(for: sub.pr) { sub.addItem(reReview) }
         if let merge = mergeControl(for: sub.pr) { sub.addItem(merge) }
@@ -660,24 +677,36 @@ final class StatusController: NSObject {
         let alert = NSAlert()
         alert.messageText = "Reply to \(t.comment.author)"
         let quoted = t.comment.body.prefix(Self.replyQuoteLimit)
-        alert.informativeText = t.comment.inlineCommentID == nil
+        let note = t.comment.inlineCommentID == nil
             ? "\(quoted)\n\nThis posts as a new PR comment — GitHub has no reply endpoint for a review."
             : "\(quoted)"
+        alert.informativeText = "\(note)\n\n(Tip: Enter inserts newline; click Reply or press Return to submit)"
 
-        // ponytail: one wrapping NSTextField, so Return sends rather than making a
-        // newline. Swap in an NSTextView in a scroll view if multi-line replies matter.
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 68))
-        field.placeholderString = "Your reply (Markdown)"
-        field.usesSingleLineMode = false
-        field.cell?.wraps = true
-        field.lineBreakMode = .byWordWrapping
-        alert.accessoryView = field
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 340, height: 96))
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+
+        let contentSize = scrollView.contentSize
+        let textView = NSTextView(frame: NSRect(origin: .zero, size: contentSize))
+        textView.minSize = NSSize(width: 0.0, height: contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.isRichText = false
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        scrollView.documentView = textView
+
+        alert.accessoryView = scrollView
         alert.addButton(withTitle: "Reply")
         alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
+        alert.window.initialFirstResponder = textView
+        alert.window.level = .floating
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let body = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
         run { await self.model.reply(to: t.comment, on: t.pr, body: body) }
     }
@@ -709,11 +738,7 @@ final class StatusController: NSObject {
     /// Template SF Symbol for a menu row — tints to the menu's label color, so it
     /// follows the active theme without per-palette wiring.
     private static func menuIcon(_ name: String) -> NSImage? {
-        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(cfg) else { return nil }
-        img.isTemplate = true
-        return img
+        PRPeek.menuIcon(name)
     }
     static let shortTime: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; return f }()
     private static func time(_ d: Date) -> String { shortTime.string(from: d) }

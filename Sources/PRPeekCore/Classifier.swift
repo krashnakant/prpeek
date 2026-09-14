@@ -68,12 +68,12 @@ public enum Classifier {
         return nil
     }
 
-    /// Roll up check-runs. Precise rule (plan): any failed run -> failing;
+    /// Roll up check-runs. Precise rule: any failed run -> failing;
     /// else any not-completed -> pending; else passing; no runs -> none.
-    /// neutral/skipped/success/stale are treated as NOT failed.
+    /// neutral/skipped/success/stale/cancelled are treated as NOT failed.
     static func ciState(from runs: [CheckRun]) -> CIState {
         if runs.isEmpty { return .none }
-        let failing: Set<String> = ["failure", "timed_out", "action_required", "cancelled"]
+        let failing: Set<String> = ["failure", "timed_out", "action_required"]
         if runs.contains(where: { ($0.conclusion).map(failing.contains) ?? false }) { return .failing }
         if runs.contains(where: { $0.status != "completed" }) { return .pending }
         return .passing

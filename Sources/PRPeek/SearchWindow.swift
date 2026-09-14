@@ -62,6 +62,8 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         table.doubleAction = #selector(openSelected)
         table.onEnter = { [weak self] in self?.openSelected() }
         table.onEscape = { [weak self] in self?.hide() }
+        table.onCopy = { [weak self] in self?.copySelectedURL() }
+        table.contextMenuProvider = { [weak self] in self?.makeContextMenu() }
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -184,28 +186,137 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
             table.selectRowIndexes([next], byExtendingSelection: false)
             table.scrollRowToVisible(next)
             return true
+        case #selector(NSText.copy(_:)):
+            if textView.selectedRange.length == 0, selectedPR != nil {
+                copySelectedURL()
+                return true
+            }
+            return false
         default:
             return false
         }
     }
 
-    @objc private func openSelected() {
+    private var selectedPR: PullRequest? {
         let row = table.selectedRow >= 0 ? table.selectedRow : (results.isEmpty ? -1 : 0)
-        guard results.indices.contains(row) else { return }
-        model.open(results[row])   // via the model so opening clears the "new" marker
+        guard results.indices.contains(row) else { return nil }
+        return results[row]
+    }
+
+    @objc private func openSelected() {
+        guard let pr = selectedPR else { return }
+        model.open(pr)   // via the model so opening clears the "new" marker
         hide()
+    }
+
+    @objc private func copySelectedURL() {
+        guard let pr = selectedPR else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(pr.htmlURL.absoluteString, forType: .string)
+        countLabel.stringValue = "Copied \(pr.repoFullName)#\(pr.number) URL to clipboard"
+    }
+
+    @objc private func copySelectedTitle() {
+        guard let pr = selectedPR else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(pr.title, forType: .string)
+        countLabel.stringValue = "Copied \(pr.repoFullName)#\(pr.number) title to clipboard"
+    }
+
+    @objc private func unmuteSelected() {
+        guard let pr = selectedPR else { return }
+        model.unmute(pr)
+        countLabel.stringValue = "Unmuted \(pr.repoFullName)#\(pr.number)"
+    }
+
+    @objc private func snoozeSelected1h() {
+        guard let pr = selectedPR else { return }
+        model.mute(pr, for: 3600)
+        countLabel.stringValue = "Snoozed \(pr.repoFullName)#\(pr.number) for 1 hour"
+    }
+
+    @objc private func snoozeSelected4h() {
+        guard let pr = selectedPR else { return }
+        model.mute(pr, for: 14400)
+        countLabel.stringValue = "Snoozed \(pr.repoFullName)#\(pr.number) for 4 hours"
+    }
+
+    @objc private func snoozeSelectedUntilUpdated() {
+        guard let pr = selectedPR else { return }
+        model.muteUntilUpdated(pr)
+        countLabel.stringValue = "Snoozed \(pr.repoFullName)#\(pr.number) until updated"
+    }
+
+    private func makeContextMenu() -> NSMenu? {
+        guard let pr = selectedPR else { return nil }
+        let menu = NSMenu()
+        let open = NSMenuItem(title: "Open in Browser", action: #selector(openSelected), keyEquivalent: "")
+        open.target = self
+        open.image = menuIcon("arrow.up.right.square")
+        menu.addItem(open)
+
+        let copyURL = NSMenuItem(title: "Copy URL", action: #selector(copySelectedURL), keyEquivalent: "")
+        copyURL.target = self
+        copyURL.image = menuIcon("doc.on.doc")
+        menu.addItem(copyURL)
+
+        let copyTitle = NSMenuItem(title: "Copy Title", action: #selector(copySelectedTitle), keyEquivalent: "")
+        copyTitle.target = self
+        copyTitle.image = menuIcon("text.alignleft")
+        menu.addItem(copyTitle)
+
+        menu.addItem(.separator())
+
+        if model.isMuted(pr) {
+            let unmute = NSMenuItem(title: "Unmute", action: #selector(unmuteSelected), keyEquivalent: "")
+            unmute.target = self
+            unmute.image = menuIcon("bell")
+            menu.addItem(unmute)
+        } else {
+            let snooze = NSMenuItem(title: "Snooze", action: nil, keyEquivalent: "")
+            snooze.image = menuIcon("moon.zzz")
+            let sub = NSMenu()
+            let s1 = NSMenuItem(title: "1 hour", action: #selector(snoozeSelected1h), keyEquivalent: "")
+            s1.target = self
+            sub.addItem(s1)
+            let s4 = NSMenuItem(title: "4 hours", action: #selector(snoozeSelected4h), keyEquivalent: "")
+            s4.target = self
+            sub.addItem(s4)
+            let sUp = NSMenuItem(title: "Until it updates", action: #selector(snoozeSelectedUntilUpdated), keyEquivalent: "")
+            sUp.target = self
+            sub.addItem(sUp)
+            snooze.submenu = sub
+            menu.addItem(snooze)
+        }
+        return menu
     }
 }
 
-/// NSTableView that reports Return/Escape so the window can open or dismiss.
+/// NSTableView that reports Return/Escape/Copy so the window can open, dismiss, or copy.
 final class KeyTableView: NSTableView {
     var onEnter: (() -> Void)?
     var onEscape: (() -> Void)?
+    var onCopy: (() -> Void)?
+    var contextMenuProvider: (() -> NSMenu?)?
+
     override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "c" {
+            onCopy?()
+            return
+        }
         switch event.keyCode {
         case 36, 76: onEnter?()       // Return, keypad Enter
         case 53:     onEscape?()      // Escape
         default:     super.keyDown(with: event)
         }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let pt = convert(event.locationInWindow, from: nil)
+        let r = row(at: pt)
+        if r >= 0 && r < numberOfRows {
+            selectRowIndexes(IndexSet(integer: r), byExtendingSelection: false)
+        }
+        return contextMenuProvider?() ?? super.menu(for: event)
     }
 }

@@ -91,3 +91,13 @@ extension PRFreshness {
 func accountTag(_ label: String?) -> String {
     label.map { "[\($0)] " } ?? ""
 }
+
+/// Template SF Symbol for menus and context menus (isTemplate=true, so it tints to the system label color).
+func menuIcon(_ name: String) -> NSImage? {
+    let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+    guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+        .withSymbolConfiguration(cfg) else { return nil }
+    img.isTemplate = true
+    return img
+}
+

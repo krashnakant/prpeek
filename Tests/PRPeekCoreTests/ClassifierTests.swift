@@ -82,6 +82,12 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(Classifier.ciState(from: runs), .passing)
     }
 
+    func test_ci_cancelled_does_not_fail() {
+        let runs = [CheckRun(status: "completed", conclusion: "cancelled"),
+                    CheckRun(status: "completed", conclusion: "success")]
+        XCTAssertEqual(Classifier.ciState(from: runs), .passing)
+    }
+
     // client fetch + map
     func test_ciState_fetch_maps_failing() async throws {
         let body = #"{"check_runs":[{"status":"completed","conclusion":"timed_out"}]}"#

@@ -15,7 +15,7 @@ public struct Account: Codable, Sendable, Identifiable, Equatable {
     public var label: String
 
     public init(id: String = UUID().uuidString, host: String = "", label: String) {
-        self.id = id; self.host = host; self.label = label
+        self.id = id; self.host = GitHubClient.cleanHost(host); self.label = label
     }
 
     /// Keychain account name for this identity's token. The first account keeps

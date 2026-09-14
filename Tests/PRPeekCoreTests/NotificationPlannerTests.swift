@@ -41,6 +41,16 @@ final class NotificationPlannerTests: XCTestCase {
         XCTAssertEqual(events.map(\.kind), [.ciFailed])
     }
 
+    func test_draft_pr_ci_failure_does_not_notify() {
+        let draft = PullRequest(id: "draft1", number: 1, repoFullName: "o/r", title: "t",
+                                htmlURL: URL(string: "https://github.com/o/r/pull/1")!,
+                                isDraft: true, author: "me", ciState: .failing, waitingOnMe: false,
+                                updatedAt: Date(timeIntervalSince1970: 0),
+                                accountID: "acct", isMine: true)
+        let events = NotificationPlanner.events(previous: [], current: [draft])
+        XCTAssertTrue(events.isEmpty, "draft PRs should not alert for CI failure")
+    }
+
     func test_dedup_within_single_pass() {
         // same PR id twice (shouldn't happen, but planner must not double-fire)
         let curr = [pr("D", author: "other", waiting: true), pr("D", author: "other", waiting: true)]

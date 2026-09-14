@@ -86,6 +86,7 @@ public struct KeychainTokenStore: TokenStore {
         if status == errSecItemNotFound {
             var add = baseQuery
             add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             let addStatus = SecItemAdd(add as CFDictionary, nil)
             guard addStatus == errSecSuccess else { throw KeychainError.status(addStatus) }
         } else if status != errSecSuccess {

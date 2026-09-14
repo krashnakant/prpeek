@@ -78,8 +78,8 @@ public struct RefreshEngine: Sendable {
         let (owner, repo) = pr.ownerRepo
         let detail = try await client.pullDetail(owner: owner, repo: repo, number: pr.number)
         let ci = try await client.ciState(owner: owner, repo: repo, sha: detail.headSHA)
-        // qualify team slugs with the repo owner (the org) to match viewer team keys
-        let teamKeys = detail.requestedTeamSlugs.map { "\(owner)/\($0)" }
+        // qualify team slugs with the repo owner (the org) to match viewer team keys (case-insensitive)
+        let teamKeys = detail.requestedTeamSlugs.map { "\(owner.lowercased())/\($0.lowercased())" }
         let signal = ReviewSignal(requestedReviewerLogins: detail.requestedReviewers,
                                   requestedTeamKeys: teamKeys)
         let reason = Classifier.waitReason(isDraft: detail.isDraft, author: pr.author,

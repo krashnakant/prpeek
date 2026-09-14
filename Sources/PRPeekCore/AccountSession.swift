@@ -85,6 +85,8 @@ public final class AccountSession {
         try tokenStore.save(token)
         tokenKnown = true
         hasToken = true
+        let client = self.client
+        Task { await client.setToken(token) }
     }
 
     /// Forget this identity entirely: Keychain entry, in-memory token, caches.

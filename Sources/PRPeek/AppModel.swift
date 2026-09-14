@@ -88,7 +88,7 @@ final class AppModel {
         state.accounts = accounts
         epoch += 1
         saveState()
-        Task { await session.client.setToken(trimmed); startLoop() }
+        startLoop()
     }
 
     func removeAccount(_ id: String) {
@@ -140,7 +140,7 @@ final class AppModel {
     /// surface can open a PR without clearing its "new" marker.
     func open(_ pr: PullRequest) {
         markSeen(pr)
-        NSWorkspace.shared.open(pr.htmlURL)
+        NSWorkspace.shared.openSafeWebURL(pr.htmlURL)
     }
 
     // MARK: - Mute / snooze (local triage, no API)
@@ -222,7 +222,7 @@ final class AppModel {
 
     func start() {
         AppLog.appModel.info("App model starting")
-        notifier.onOpen = { url in NSWorkspace.shared.open(url) }
+        notifier.onOpen = { url in NSWorkspace.shared.openSafeWebURL(url) }
         // Wake / reconnect RESTART the loop (not a one-shot) — else periodic
         // polling dies after the first sleep.
         lifecycle.onWake = { [weak self] in self?.startLoop() }
@@ -245,11 +245,18 @@ final class AppModel {
         }
     }
 
-    /// Back off until the rate-limit reset when limited; otherwise normal cadence.
+    /// Back off until the rate-limit reset when all active accounts are limited; otherwise normal cadence.
     private func nextSleepNanos() -> UInt64 {
-        if case .rateLimited(let until) = status, let until {
-            let secs = max(until.timeIntervalSinceNow, 5)
-            return UInt64(secs * 1_000_000_000)
+        let activeSessions = sessions.filter { !$0.status.isSignedOut }
+        if !activeSessions.isEmpty && activeSessions.allSatisfy({ if case .rateLimited = $0.status { true } else { false } }) {
+            let resets = activeSessions.compactMap { session -> Date? in
+                if case .rateLimited(let until) = session.status { return until }
+                return nil
+            }
+            if let earliest = resets.min() {
+                let secs = max(earliest.timeIntervalSinceNow, 5)
+                return UInt64(secs * 1_000_000_000)
+            }
         }
         return UInt64(refreshIntervalSecs) * 1_000_000_000
     }
@@ -322,6 +329,10 @@ final class AppModel {
     /// own status and its last-known PRs are kept, so the merged list degrades
     /// per account instead of all at once.
     private func refresh(_ session: AccountSession) async -> [PullRequest] {
+        if case .rateLimited(let until) = session.status, let until, until > Date() {
+            AppLog.appModel.debug("Account rate-limited; skipping poll until reset")
+            return session.previousPRs
+        }
         guard await session.resolveTokenIfNeeded() else {
             AppLog.appModel.error("Refresh blocked by Keychain read failure")
             session.status = .error("Keychain locked — unlock to refresh")
@@ -542,7 +553,7 @@ final class AppModel {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(code.userCode, forType: .string)
                         self.setStatus(.authorizing(code: code.userCode))
-                        if let url = code.bestVerificationURL { NSWorkspace.shared.open(url) }
+                        if let url = code.bestVerificationURL { NSWorkspace.shared.openSafeWebURL(url) }
                     }
                 })
                 AppLog.appModel.info("Device sign-in completed")
@@ -560,5 +571,17 @@ final class AppModel {
                 self.setStatus(.error("Sign-in failed: \(error)"))
             }
         }
+    }
+}
+
+extension NSWorkspace {
+    /// Opens a web URL only if the scheme is https or http, protecting against
+    /// arbitrary scheme execution (file://, terminal://, applescript://, etc.).
+    @discardableResult
+    func openSafeWebURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else {
+            return false
+        }
+        return open(url)
     }
 }

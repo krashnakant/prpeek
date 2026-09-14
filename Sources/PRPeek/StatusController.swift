@@ -187,11 +187,13 @@ final class StatusController: NSObject {
         // A PR opens through the model so it counts as seen; plain URLs (a
         // commit, a review comment) just open.
         if let pr = sender.representedObject as? PullRequest { model.open(pr) }
-        else if let url = sender.representedObject as? URL { NSWorkspace.shared.open(url) }
+        else if let url = sender.representedObject as? URL { NSWorkspace.shared.openSafeWebURL(url) }
     }
     @objc private func openAll() {
         AppLog.statusMenu.info("Open GitHub pulls action selected")
-        NSWorkspace.shared.open(URL(string: "https://github.com/pulls")!)
+        let ghesHost = model.sessions.first(where: { !$0.account.host.isEmpty })?.account.host ?? ""
+        let url = GitHubClient.webBase(forHost: ghesHost).appending(path: "pulls")
+        NSWorkspace.shared.openSafeWebURL(url)
     }
     @objc private func refresh() {
         AppLog.statusMenu.info("Manual refresh action selected")
@@ -740,7 +742,11 @@ extension StatusController: NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
-        openMenus = max(0, openMenus - 1)
+        if menu === item.menu {
+            openMenus = 0
+        } else {
+            openMenus = max(0, openMenus - 1)
+        }
         AppLog.statusMenu.debug("Menu closed remainingOpenMenus=\(self.openMenus, privacy: .public)")
         // When the whole menu tree has closed, apply any rebuild we deferred
         // while it was open (theme recolor, refreshed PR list, …).

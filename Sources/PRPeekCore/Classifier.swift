@@ -100,7 +100,7 @@ public extension GitHubClient {
     /// GET /user/teams -> {"org/slug"} for team-membership classification.
     func viewerTeamKeys() async throws -> Set<String> {
         let teams: [ViewerTeam] = try await getCollection(path: "/user/teams")
-        return Set(teams.map { "\($0.organization.login)/\($0.slug)" })
+        return Set(teams.map { "\($0.organization.login.lowercased())/\($0.slug.lowercased())" })
     }
 }
 

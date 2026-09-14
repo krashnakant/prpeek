@@ -49,9 +49,9 @@ public enum NotificationPlanner {
                     url: pr.htmlURL))
             }
 
-            // CI failed on your own PR, edge-triggered.
-            let nowCIFail = pr.isMine && pr.ciState == .failing
-            let wasCIFail = (before?.isMine ?? false) && (before?.ciState == .failing)
+            // CI failed on your own PR, edge-triggered (suppress drafts to match waitReason).
+            let nowCIFail = pr.isMine && !pr.isDraft && pr.ciState == .failing
+            let wasCIFail = (before?.isMine ?? false) && !(before?.isDraft ?? false) && (before?.ciState == .failing)
             if nowCIFail && !wasCIFail {
                 add(&out, &seen, NotificationEvent(
                     prKey: pr.key, kind: .ciFailed,

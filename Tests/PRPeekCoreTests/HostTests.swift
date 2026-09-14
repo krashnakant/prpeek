@@ -18,4 +18,20 @@ final class HostTests: XCTestCase {
         XCTAssertEqual(GitHubClient.apiBase(forHost: "  GitHub.ACME.com ").absoluteString,
                        "https://github.acme.com/api/v3")
     }
+
+    func test_cleanHost_strips_schemes_userinfo_and_trailing_paths() {
+        XCTAssertEqual(GitHubClient.cleanHost("https://github.acme.com"), "github.acme.com")
+        XCTAssertEqual(GitHubClient.cleanHost("http://github.acme.com/"), "github.acme.com")
+        XCTAssertEqual(GitHubClient.cleanHost("https://github.acme.com/api/v3"), "github.acme.com")
+        XCTAssertEqual(GitHubClient.cleanHost("user@github.acme.com/"), "github.acme.com")
+        XCTAssertEqual(GitHubClient.cleanHost("https://github.com/"), "")
+        XCTAssertEqual(GitHubClient.cleanHost("  "), "")
+    }
+
+    func test_apiBase_and_webBase_handle_full_urls() {
+        XCTAssertEqual(GitHubClient.apiBase(forHost: "https://github.acme.com/").absoluteString,
+                       "https://github.acme.com/api/v3")
+        XCTAssertEqual(GitHubClient.webBase(forHost: "https://github.acme.com/").absoluteString,
+                       "https://github.acme.com")
+    }
 }

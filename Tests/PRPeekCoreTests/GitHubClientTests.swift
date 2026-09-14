@@ -160,6 +160,28 @@ final class GitHubClientTests: XCTestCase {
         let all: [Probe] = try await client.getCollection(path: "/things")
         XCTAssertEqual(all.map(\.login), ["a", "b"], "no Link on 304 -> stop after page 1")
     }
+
+    func test_nextLink_validates_host_and_formats() {
+        let sameHostResp = httpResponse(url: URL(string: "https://api.github.com/things")!,
+                                        status: 200,
+                                        headers: ["Link": "<https://api.github.com/things?page=2>; rel=\"next\""])
+        XCTAssertEqual(GitHubClient.nextLink(from: sameHostResp, expectedHost: "api.github.com")?.absoluteString,
+                       "https://api.github.com/things?page=2")
+
+        // External host rejected
+        let foreignResp = httpResponse(url: URL(string: "https://api.github.com/things")!,
+                                       status: 200,
+                                       headers: ["Link": "<https://evil.com/things?page=2>; rel=\"next\""])
+        XCTAssertNil(GitHubClient.nextLink(from: foreignResp, expectedHost: "api.github.com"),
+                     "nextLink must reject foreign host to prevent token leakage")
+
+        // Unquoted rel=next and extra attributes accepted
+        let unquotedResp = httpResponse(url: URL(string: "https://api.github.com/things")!,
+                                        status: 200,
+                                        headers: ["Link": "<https://api.github.com/things?page=2>; title=\"next\"; rel=next"])
+        XCTAssertEqual(GitHubClient.nextLink(from: unquotedResp, expectedHost: "api.github.com")?.absoluteString,
+                       "https://api.github.com/things?page=2")
+    }
 }
 
 /// Tiny async throws helper (no framework).

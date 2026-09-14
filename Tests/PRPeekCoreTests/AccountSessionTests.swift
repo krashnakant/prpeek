@@ -49,6 +49,14 @@ final class AccountSessionTests: XCTestCase {
         XCTAssertTrue(s.hasToken)
     }
 
+    func test_save_token_updates_session_and_client() async throws {
+        let s = AccountSession(account: account(), tokenStore: InMemoryTokenStore())
+        XCTAssertFalse(s.hasToken)
+        try s.save(token: "ghp_new")
+        XCTAssertTrue(s.hasToken)
+        XCTAssertTrue(s.tokenKnown)
+    }
+
     func test_sign_out_clears_identity_and_resets_first_pass() {
         let store = InMemoryTokenStore("ghp_x")
         let s = AccountSession(account: account(), tokenStore: store)

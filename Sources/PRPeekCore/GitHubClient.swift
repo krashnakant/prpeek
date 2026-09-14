@@ -7,17 +7,40 @@ import Foundation
 public actor GitHubClient {
     public static let dotComBase = URL(string: "https://api.github.com")!
 
+    /// Clean and normalize a host string: strips scheme prefixes (http://, https://),
+    /// userinfo, trailing slashes, and paths. Returns "" for github.com or empty.
+    public static func cleanHost(_ host: String) -> String {
+        var h = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if h.hasPrefix("https://") { h = String(h.dropFirst(8)) }
+        else if h.hasPrefix("http://") { h = String(h.dropFirst(7)) }
+        if let atIndex = h.firstIndex(of: "@") {
+            h = String(h[h.index(after: atIndex)...])
+        }
+        if let slashIndex = h.firstIndex(of: "/") {
+            h = String(h[..<slashIndex])
+        }
+        h = h.trimmingCharacters(in: CharacterSet(charactersIn: "/: "))
+        if h.isEmpty || h == "github.com" || h == "api.github.com" { return "" }
+        return h
+    }
+
     /// REST API base. github.com -> api.github.com; GHES -> https://HOST/api/v3.
     public static func apiBase(forHost host: String) -> URL {
-        let h = host.trimmingCharacters(in: .whitespaces).lowercased()
-        if h.isEmpty || h == "github.com" || h == "api.github.com" { return dotComBase }
-        return URL(string: "https://\(h)/api/v3") ?? dotComBase
+        let h = cleanHost(host)
+        if h.isEmpty { return dotComBase }
+        guard let url = URL(string: "https://\(h)/api/v3"), url.host != nil else {
+            return dotComBase
+        }
+        return url
     }
     /// Web base (device-flow + browser links). github.com -> github.com; GHES -> HOST.
     public static func webBase(forHost host: String) -> URL {
-        let h = host.trimmingCharacters(in: .whitespaces).lowercased()
-        if h.isEmpty || h == "github.com" || h == "api.github.com" { return URL(string: "https://github.com")! }
-        return URL(string: "https://\(h)") ?? URL(string: "https://github.com")!
+        let h = cleanHost(host)
+        if h.isEmpty { return URL(string: "https://github.com")! }
+        guard let url = URL(string: "https://\(h)"), url.host != nil else {
+            return URL(string: "https://github.com")!
+        }
+        return url
     }
 
     public let baseURL: URL
@@ -80,7 +103,7 @@ public actor GitHubClient {
         while let current = url {
             let (data, http) = try await rawGet(url: current)
             out.append(contentsOf: try decode([T].self, from: data, url: current))
-            url = Self.nextLink(from: http)
+            url = Self.nextLink(from: http, expectedHost: baseURL.host)
         }
         return out
     }
@@ -95,7 +118,7 @@ public actor GitHubClient {
         while let current = url {
             let (data, http) = try await rawGet(url: current)
             out.append(try decode(Page.self, from: data, url: current))
-            url = Self.nextLink(from: http)
+            url = Self.nextLink(from: http, expectedHost: baseURL.host)
         }
         return out
     }
@@ -112,7 +135,7 @@ public actor GitHubClient {
             let (data, http) = try await rawGet(url: current)
             let page = try decode(SearchPage<Item>.self, from: data, url: current)
             out.append(contentsOf: page.items)
-            url = Self.nextLink(from: http)
+            url = Self.nextLink(from: http, expectedHost: baseURL.host)
         }
         return Array(out.prefix(maxItems))
     }
@@ -225,16 +248,25 @@ public actor GitHubClient {
     }
 
     /// Parse `Link: <url>; rel="next", <url>; rel="last"` -> the next URL.
-    static func nextLink(from http: HTTPURLResponse) -> URL? {
+    /// Rejects URLs targeting a different host than `expectedHost` to prevent token leakage.
+    static func nextLink(from http: HTTPURLResponse, expectedHost: String? = nil) -> URL? {
         guard let header = http.value(forHTTPHeaderField: "Link") else { return nil }
         for part in header.split(separator: ",") {
-            let segs = part.split(separator: ";")
+            let segs = part.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
             guard segs.count >= 2 else { continue }
-            let urlPart = segs[0].trimmingCharacters(in: .whitespaces)
-            let relPart = segs[1].trimmingCharacters(in: .whitespaces)
-            if relPart == "rel=\"next\"",
-               urlPart.hasPrefix("<"), urlPart.hasSuffix(">") {
-                return URL(string: String(urlPart.dropFirst().dropLast()))
+            let urlPart = segs[0]
+            guard urlPart.hasPrefix("<") && urlPart.hasSuffix(">") else { continue }
+            let urlString = String(urlPart.dropFirst().dropLast())
+            let params = segs.dropFirst()
+            let isNext = params.contains { param in
+                let p = param.lowercased()
+                return p == "rel=\"next\"" || p == "rel=next" || p == "rel='next'"
+            }
+            if isNext, let url = URL(string: urlString) {
+                if let expectedHost {
+                    guard url.host?.lowercased() == expectedHost.lowercased() else { return nil }
+                }
+                return url
             }
         }
         return nil

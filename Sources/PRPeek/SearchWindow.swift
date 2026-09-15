@@ -8,9 +8,26 @@ import PRPeekCore
 /// ponytail: filters the already-loaded `model.all` in memory — no new fetch.
 @MainActor
 final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+    enum Scope: Int, CaseIterable {
+        case all = 0
+        case needsMe = 1
+        case mine = 2
+        case muted = 3
+
+        var baseTitle: String {
+            switch self {
+            case .all: return "All"
+            case .needsMe: return "Needs Me"
+            case .mine: return "Mine"
+            case .muted: return "Muted"
+            }
+        }
+    }
+
     private let model: AppModel
     private var window: NSWindow?
-    private let searchField = NSSearchField()
+    private let searchField = KeySearchField()
+    private let scopeControl = NSSegmentedControl()
     private let table = KeyTableView()
     private let countLabel = NSTextField(labelWithString: "")
 
@@ -29,6 +46,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     func show() {
         if window == nil { window = makeWindow() }
         reindex()
+        updateScopeCounts()
         reload()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)   // accessory app needs this to take focus
@@ -40,6 +58,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     func refresh() {
         if isVisible {
             reindex()
+            updateScopeCounts()
             reload()
         }
     }
@@ -52,20 +71,58 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         }
     }
 
+    private func updateScopeCounts() {
+        let allCount = model.all.count
+        let needsCount = model.needsMe.count
+        let mineCount = model.mine.count
+        let mutedCount = model.muted.count
+        scopeControl.setLabel("All (\(allCount))", forSegment: Scope.all.rawValue)
+        scopeControl.setLabel("Needs Me (\(needsCount))", forSegment: Scope.needsMe.rawValue)
+        scopeControl.setLabel("Mine (\(mineCount))", forSegment: Scope.mine.rawValue)
+        scopeControl.setLabel("Muted (\(mutedCount))", forSegment: Scope.muted.rawValue)
+    }
+
+    private func selectScope(_ index: Int) {
+        guard index >= 0, index < scopeControl.segmentCount else { return }
+        scopeControl.selectedSegment = index
+        reload()
+    }
+
+    @objc private func scopeChanged() {
+        reload()
+    }
+
     // MARK: build
 
     private func makeWindow() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 460),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.title = "Search PRs"
         w.isReleasedWhenClosed = false
         w.setFrameAutosaveName("PRPeekSearchWindow")
-        w.minSize = NSSize(width: 440, height: 280)
+        w.minSize = NSSize(width: 480, height: 300)
         w.center()
 
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.placeholderString = "Filter by repo, number, title, or author"
         searchField.delegate = self
+        searchField.onScopeShortcut = { [weak self] index in self?.selectScope(index) }
+
+        scopeControl.segmentCount = Scope.allCases.count
+        for scope in Scope.allCases {
+            scopeControl.setLabel(scope.baseTitle, forSegment: scope.rawValue)
+        }
+        scopeControl.selectedSegment = Scope.all.rawValue
+        scopeControl.segmentDistribution = .fillEqually
+        scopeControl.trackingMode = .selectOne
+        scopeControl.target = self
+        scopeControl.action = #selector(scopeChanged)
+        scopeControl.translatesAutoresizingMaskIntoConstraints = false
+        scopeControl.setToolTip("All PRs (⌘1)", forSegment: Scope.all.rawValue)
+        scopeControl.setToolTip("PRs waiting on your review (⌘2)", forSegment: Scope.needsMe.rawValue)
+        scopeControl.setToolTip("PRs created by you (⌘3)", forSegment: Scope.mine.rawValue)
+        scopeControl.setToolTip("Muted / snoozed PRs (⌘4)", forSegment: Scope.muted.rawValue)
+        updateScopeCounts()
 
         countLabel.font = .systemFont(ofSize: 11)
         countLabel.textColor = .secondaryLabelColor
@@ -89,6 +146,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         table.onEnter = { [weak self] in self?.openSelected() }
         table.onEscape = { [weak self] in self?.hide() }
         table.onCopy = { [weak self] in self?.copySelectedURL() }
+        table.onScopeShortcut = { [weak self] index in self?.selectScope(index) }
         table.contextMenuProvider = { [weak self] in self?.makeContextMenu() }
 
         let scroll = NSScrollView()
@@ -100,15 +158,22 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
 
         let content = w.contentView!
         content.addSubview(searchField)
+        content.addSubview(scopeControl)
         content.addSubview(countLabel)
         content.addSubview(scroll)
         NSLayoutConstraint.activate([
             searchField.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
             searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
-            countLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
+
+            scopeControl.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            scopeControl.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            scopeControl.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+
+            countLabel.topAnchor.constraint(equalTo: scopeControl.bottomAnchor, constant: 6),
             countLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             countLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+
             scroll.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
@@ -123,20 +188,36 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         let q = searchField.stringValue.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let previousSelectedID = selectedPR?.id
 
+        let currentScope = Scope(rawValue: scopeControl.selectedSegment) ?? .all
+        let scopedPRs: [SearchItem]
+        switch currentScope {
+        case .all:
+            scopedPRs = indexedPRs
+        case .needsMe:
+            let set = Set(model.needsMe.map(\.id))
+            scopedPRs = indexedPRs.filter { set.contains($0.pr.id) }
+        case .mine:
+            let set = Set(model.mine.map(\.id))
+            scopedPRs = indexedPRs.filter { set.contains($0.pr.id) }
+        case .muted:
+            let set = Set(model.muted.map(\.id))
+            scopedPRs = indexedPRs.filter { set.contains($0.pr.id) }
+        }
+
         if q.isEmpty {
-            results = indexedPRs.map(\.pr)
+            results = scopedPRs.map(\.pr)
         } else {
             let terms = q.split(whereSeparator: \.isWhitespace).map(String.init)
-            results = indexedPRs.filter { item in
+            results = scopedPRs.filter { item in
                 terms.allSatisfy { item.searchableText.contains($0) }
             }.map(\.pr)
         }
 
         table.reloadData()
 
-        let total = indexedPRs.count
+        let total = scopedPRs.count
         if results.isEmpty {
-            countLabel.stringValue = total == 0 ? "No PRs loaded" : (q.isEmpty ? "No PRs" : "No matches for \"\(q)\"")
+            countLabel.stringValue = total == 0 ? "No PRs in \(currentScope.baseTitle.lowercased())" : (q.isEmpty ? "No PRs" : "No matches for \"\(q)\"")
             table.deselectAll(nil)
         } else {
             if q.isEmpty {
@@ -226,24 +307,32 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     @objc private func unmuteSelected() {
         guard let pr = selectedPR else { return }
         model.unmute(pr)
+        updateScopeCounts()
+        reload()
         countLabel.stringValue = "Unmuted \(pr.repoFullName)#\(pr.number)"
     }
 
     @objc private func snoozeSelected1h() {
         guard let pr = selectedPR else { return }
         model.mute(pr, for: 3600)
+        updateScopeCounts()
+        reload()
         countLabel.stringValue = "Snoozed \(pr.repoFullName)#\(pr.number) for 1 hour"
     }
 
     @objc private func snoozeSelected4h() {
         guard let pr = selectedPR else { return }
         model.mute(pr, for: 14400)
+        updateScopeCounts()
+        reload()
         countLabel.stringValue = "Snoozed \(pr.repoFullName)#\(pr.number) for 4 hours"
     }
 
     @objc private func snoozeSelectedUntilUpdated() {
         guard let pr = selectedPR else { return }
         model.muteUntilUpdated(pr)
+        updateScopeCounts()
+        reload()
         countLabel.stringValue = "Snoozed \(pr.repoFullName)#\(pr.number) until updated"
     }
 
@@ -441,17 +530,49 @@ private final class PRSearchCellView: NSTableCellView {
     }
 }
 
-/// NSTableView that reports Return/Escape/Copy so the window can open, dismiss, or copy.
+/// NSSearchField that traps Cmd+1..4 so users can switch scopes without tabbing out of the search bar.
+final class KeySearchField: NSSearchField {
+    var onScopeShortcut: ((Int) -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command), let chars = event.charactersIgnoringModifiers {
+            switch chars {
+            case "1": onScopeShortcut?(0); return true
+            case "2": onScopeShortcut?(1); return true
+            case "3": onScopeShortcut?(2); return true
+            case "4": onScopeShortcut?(3); return true
+            default: break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// NSTableView that reports Return/Escape/Copy/Cmd+1-4 so the window can open, dismiss, copy, or switch scopes.
 final class KeyTableView: NSTableView {
     var onEnter: (() -> Void)?
     var onEscape: (() -> Void)?
     var onCopy: (() -> Void)?
+    var onScopeShortcut: ((Int) -> Void)?
     var contextMenuProvider: (() -> NSMenu?)?
 
     override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "c" {
-            onCopy?()
-            return
+        if event.modifierFlags.contains(.command), let chars = event.charactersIgnoringModifiers {
+            switch chars {
+            case "c":
+                onCopy?()
+                return
+            case "1":
+                onScopeShortcut?(0); return
+            case "2":
+                onScopeShortcut?(1); return
+            case "3":
+                onScopeShortcut?(2); return
+            case "4":
+                onScopeShortcut?(3); return
+            default:
+                break
+            }
         }
         switch event.keyCode {
         case 36, 76: onEnter?()       // Return, keypad Enter

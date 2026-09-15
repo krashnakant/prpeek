@@ -176,6 +176,33 @@ final class AppModel {
         }
         onChange?()
     }
+
+    // MARK: - Menubar Badge Preferences
+    var hideCalmCount: Bool {
+        UserDefaults.standard.bool(forKey: "hideCalmCount")
+    }
+    func setHideCalmCount(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "hideCalmCount")
+        AppLog.appModel.info("Hide calm count changed enabled=\(on, privacy: .public)")
+        onChange?()
+    }
+
+    var useDotBadge: Bool {
+        UserDefaults.standard.bool(forKey: "useDotBadge")
+    }
+    func setUseDotBadge(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "useDotBadge")
+        AppLog.appModel.info("Use dot badge changed enabled=\(on, privacy: .public)")
+        onChange?()
+    }
+
+    var globalHotkeysEnabled: Bool {
+        GlobalHotkeyManager.shared.isEnabled
+    }
+    func setGlobalHotkeysEnabled(_ on: Bool) {
+        GlobalHotkeyManager.shared.setEnabled(on)
+        onChange?()
+    }
     // Repo filter (UI: "Filter repos" submenu). `state.filters` empty == all repos.
     // ponytail: one global list across accounts — a `repo:` qualifier naming a
     // repo an account can't see just matches nothing there, so no per-account
@@ -223,6 +250,10 @@ final class AppModel {
     func start() {
         AppLog.appModel.info("App model starting")
         notifier.onOpen = { url in NSWorkspace.shared.openSafeWebURL(url) }
+        notifier.onSnoozePRKey = { [weak self] prKey in
+            guard let self, let pr = self.all.first(where: { $0.key == prKey }) else { return }
+            self.mute(pr, for: 3600)
+        }
         // Wake / reconnect RESTART the loop (not a one-shot) — else periodic
         // polling dies after the first sleep.
         lifecycle.onWake = { [weak self] in self?.startLoop() }

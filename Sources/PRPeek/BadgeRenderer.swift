@@ -4,16 +4,21 @@ import AppKit
 /// color survives only that way). Counts are baked into a pre-rendered NSImage.
 enum BadgeRenderer {
     static func icon(needsMe: Int, total: Int, signedOut: Bool, offline: Bool,
-                     accent: NSColor = .systemRed) -> NSImage {
+                     accent: NSColor = .systemRed,
+                     hideCalmCount: Bool = false,
+                     useDotBadge: Bool = false) -> NSImage {
         if signedOut { return symbol("person.crop.circle.badge.questionmark", template: true) }
         if offline { return symbol("wifi.slash", template: true) }
         if needsMe > 0 {
+            if useDotBadge {
+                return dotBadge(fill: accent)
+            }
             return pill(text: "\(needsMe)", fill: accent)   // attention: color survives (theme accent)
         }
-        if total > 0 {
+        if total > 0 && !hideCalmCount {
             return numberTemplate("\(total)")  // calm: monochrome digits (readable, HIG menubar color)
         }
-        return symbol("checkmark.circle", template: true)       // inbox zero
+        return symbol(total == 0 ? "checkmark.circle" : "arrow.triangle.pull", template: true)
     }
 
     /// Calm-state count: digits only (transparent background), template so macOS
@@ -49,6 +54,24 @@ enum BadgeRenderer {
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
         (text as NSString).draw(at: NSPoint(x: (width - textSize.width) / 2,
                                             y: (height - textSize.height) / 2), withAttributes: attrs)
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
+
+    /// Minimal status dot badge: clean template git icon with a tinted dot indicator.
+    static func dotBadge(fill: NSColor) -> NSImage {
+        let thickness = NSStatusBar.system.thickness
+        let image = NSImage(size: NSSize(width: 20, height: thickness))
+        image.lockFocus()
+        if let base = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil) {
+            base.isTemplate = true
+            base.draw(in: NSRect(x: 0, y: (thickness - 16) / 2, width: 16, height: 16))
+        }
+        let dotRect = NSRect(x: 12, y: thickness - 8, width: 7, height: 7)
+        let dot = NSBezierPath(ovalIn: dotRect)
+        fill.setFill()
+        dot.fill()
         image.unlockFocus()
         image.isTemplate = false
         return image

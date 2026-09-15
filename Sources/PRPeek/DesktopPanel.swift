@@ -22,7 +22,13 @@ final class DesktopPanel: NSObject {
     init(model: AppModel) {
         self.model = model
         super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged),
+                                               name: NSApplication.didChangeScreenParametersNotification, object: nil)
         if UserDefaults.standard.bool(forKey: Self.showKey) { show() }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     var isVisible: Bool { window?.isVisible ?? false }
@@ -41,6 +47,7 @@ final class DesktopPanel: NSObject {
         if window == nil { window = makeWindow() }
         UserDefaults.standard.set(true, forKey: Self.showKey)
         applyWindowPlacement()
+        ensureVisibleOnScreen()
         AppLog.desktopPanel.info("Desktop panel shown")
         window?.orderFrontRegardless()
         refresh()
@@ -50,6 +57,56 @@ final class DesktopPanel: NSObject {
         window?.orderOut(nil)
         UserDefaults.standard.set(false, forKey: Self.showKey)
         AppLog.desktopPanel.info("Desktop panel hidden")
+    }
+
+    @objc private func screenParametersChanged() {
+        guard isVisible else { return }
+        ensureVisibleOnScreen()
+    }
+
+    /// Clamp the panel inside visible display bounds so disconnecting an external
+    /// monitor or changing resolution never leaves it trapped off-screen.
+    func ensureVisibleOnScreen() {
+        guard let w = window else { return }
+        let currentFrame = w.frame
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+
+        var bestScreen = NSScreen.main ?? screens[0]
+        var maxIntersectionArea: CGFloat = 0
+
+        for screen in screens {
+            let intersection = screen.visibleFrame.intersection(currentFrame)
+            if !intersection.isNull {
+                let area = intersection.width * intersection.height
+                if area > maxIntersectionArea {
+                    maxIntersectionArea = area
+                    bestScreen = screen
+                }
+            }
+        }
+
+        let targetScreen = maxIntersectionArea > 100 ? bestScreen : (NSScreen.main ?? screens[0])
+        let visible = targetScreen.visibleFrame
+
+        var newOrigin = currentFrame.origin
+        if newOrigin.x + currentFrame.width > visible.maxX {
+            newOrigin.x = visible.maxX - currentFrame.width
+        }
+        if newOrigin.x < visible.minX {
+            newOrigin.x = visible.minX
+        }
+        if newOrigin.y + currentFrame.height > visible.maxY {
+            newOrigin.y = visible.maxY - currentFrame.height
+        }
+        if newOrigin.y < visible.minY {
+            newOrigin.y = visible.minY
+        }
+
+        if newOrigin != currentFrame.origin {
+            AppLog.desktopPanel.info("Clamping desktop panel position to visible screen bounds")
+            w.setFrameOrigin(newOrigin)
+        }
     }
 
     func setKeepOnTop(_ on: Bool) {

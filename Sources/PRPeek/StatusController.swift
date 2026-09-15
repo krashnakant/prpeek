@@ -29,6 +29,9 @@ final class StatusController: NSObject {
         self.panel = DesktopPanel(model: model)
         self.search = SearchWindow(model: model)
         super.init()
+        GlobalHotkeyManager.shared.onSearch = { [weak self] in self?.search.toggle() }
+        GlobalHotkeyManager.shared.onTogglePanel = { [weak self] in self?.panel.toggle() }
+        GlobalHotkeyManager.shared.start()
         model.onChange = { [weak self] in self?.render() }
         model.onSubmenuReload = { [weak self] id in
             self?.submenus[id]?.forEach { self?.populate($0) }
@@ -57,7 +60,9 @@ final class StatusController: NSObject {
         item.button?.image = BadgeRenderer.icon(needsMe: model.needsMe.count,
                                                  total: model.all.count,
                                                  signedOut: signedOut, offline: offline,
-                                                 accent: palette?.red ?? .systemRed)
+                                                 accent: palette?.red ?? .systemRed,
+                                                 hideCalmCount: model.hideCalmCount,
+                                                 useDotBadge: model.useDotBadge)
         item.button?.imagePosition = .imageOnly
 
         // Menu
@@ -373,10 +378,28 @@ final class StatusController: NSObject {
         sub.addItem(toggle("Launch at login", isOn: { [weak self] in self?.model.launchAtLogin ?? false }) {
             [weak self] in guard let self else { return }; self.model.setLaunchAtLogin(!self.model.launchAtLogin)
         })
+        sub.addItem(toggle("Global hotkeys (⌥⇧P, ⌥⇧D)", isOn: { [weak self] in self?.model.globalHotkeysEnabled ?? true }) {
+            [weak self] in guard let self else { return }; self.model.setGlobalHotkeysEnabled(!self.model.globalHotkeysEnabled)
+        })
+        sub.addItem(badgePreferencesItem())
         sub.addItem(intervalItem())
         sub.addItem(themeItem())
         // The GHES host moved onto the account itself (Accounts ▸ Add account),
         // so there's no global host setting to expose here any more.
+        parent.submenu = sub
+        return parent
+    }
+
+    private func badgePreferencesItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Menu bar icon", action: nil, keyEquivalent: "")
+        parent.image = Self.menuIcon("menubar.rectangle")
+        let sub = NSMenu(); sub.delegate = self
+        sub.addItem(toggle("Hide count when calm", isOn: { [weak self] in self?.model.hideCalmCount ?? false }) {
+            [weak self] in guard let self else { return }; self.model.setHideCalmCount(!self.model.hideCalmCount)
+        })
+        sub.addItem(toggle("Minimal status dot badge", isOn: { [weak self] in self?.model.useDotBadge ?? false }) {
+            [weak self] in guard let self else { return }; self.model.setUseDotBadge(!self.model.useDotBadge)
+        })
         parent.submenu = sub
         return parent
     }

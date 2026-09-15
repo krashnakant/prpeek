@@ -13,6 +13,12 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     private let searchField = NSSearchField()
     private let table = KeyTableView()
     private let countLabel = NSTextField(labelWithString: "")
+
+    private struct SearchItem {
+        let pr: PullRequest
+        let searchableText: String
+    }
+    private var indexedPRs: [SearchItem] = []
     private var results: [PullRequest] = []
 
     init(model: AppModel) { self.model = model; super.init() }
@@ -22,6 +28,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
 
     func show() {
         if window == nil { window = makeWindow() }
+        reindex()
         reload()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)   // accessory app needs this to take focus
@@ -30,16 +37,30 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     func hide() { window?.orderOut(nil) }
 
     /// Keep results live while the model refreshes underneath an open window.
-    func refresh() { if isVisible { reload() } }
+    func refresh() {
+        if isVisible {
+            reindex()
+            reload()
+        }
+    }
+
+    private func reindex() {
+        indexedPRs = model.all.map { pr in
+            let acct = model.accountLabel(for: pr) ?? ""
+            let text = "\(pr.repoFullName)#\(pr.number) \(pr.title) \(pr.author) \(acct)".lowercased()
+            return SearchItem(pr: pr, searchableText: text)
+        }
+    }
 
     // MARK: build
 
     private func makeWindow() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 460),
                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.title = "Search PRs"
         w.isReleasedWhenClosed = false
         w.setFrameAutosaveName("PRPeekSearchWindow")
+        w.minSize = NSSize(width: 440, height: 280)
         w.center()
 
         searchField.translatesAutoresizingMaskIntoConstraints = false
@@ -51,8 +72,16 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         countLabel.translatesAutoresizingMaskIntoConstraints = false
 
         table.headerView = nil
-        table.rowHeight = 24   // fits the CI glyph the panel and menu also show
-        table.addTableColumn(NSTableColumn(identifier: .init("pr")))
+        table.rowHeight = 44
+        table.style = .inset
+        table.intercellSpacing = NSSize(width: 0, height: 4)
+        table.selectionHighlightStyle = .regular
+
+        let col = NSTableColumn(identifier: .init("pr"))
+        col.resizingMask = .autoresizingMask
+        table.addTableColumn(col)
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+
         table.dataSource = self
         table.delegate = self
         table.target = self
@@ -66,6 +95,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.drawsBackground = false
 
         let content = w.contentView!
@@ -90,78 +120,49 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     // MARK: data
 
     private func reload() {
-        let q = searchField.stringValue.lowercased().trimmingCharacters(in: .whitespaces)
-        let all = model.all
-        results = q.isEmpty ? all : all.filter {
-            "\($0.repoFullName)#\($0.number) \($0.title) \($0.author)".lowercased().contains(q)
+        let q = searchField.stringValue.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousSelectedID = selectedPR?.id
+
+        if q.isEmpty {
+            results = indexedPRs.map(\.pr)
+        } else {
+            let terms = q.split(whereSeparator: \.isWhitespace).map(String.init)
+            results = indexedPRs.filter { item in
+                terms.allSatisfy { item.searchableText.contains($0) }
+            }.map(\.pr)
         }
+
         table.reloadData()
-        countLabel.stringValue = results.isEmpty
-            ? (all.isEmpty ? "No PRs loaded" : "No matches")
-            : "\(results.count) of \(all.count)"
-        if !results.isEmpty {
-            table.selectRowIndexes([0], byExtendingSelection: false)
+
+        let total = indexedPRs.count
+        if results.isEmpty {
+            countLabel.stringValue = total == 0 ? "No PRs loaded" : (q.isEmpty ? "No PRs" : "No matches for \"\(q)\"")
+            table.deselectAll(nil)
+        } else {
+            if q.isEmpty {
+                countLabel.stringValue = "\(results.count) open PR\(results.count == 1 ? "" : "s")"
+            } else {
+                countLabel.stringValue = "\(results.count) of \(total) PR\(total == 1 ? "" : "s")"
+            }
+            if let prevID = previousSelectedID, let matchIdx = results.firstIndex(where: { $0.id == prevID }) {
+                table.selectRowIndexes([matchIdx], byExtendingSelection: false)
+                table.scrollRowToVisible(matchIdx)
+            } else {
+                table.selectRowIndexes([0], byExtendingSelection: false)
+                table.scrollRowToVisible(0)
+            }
         }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { results.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("cell")
-        let cell = (tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView) ?? {
-            let c = NSTableCellView()
-            let iv = NSImageView()
-            iv.imageScaling = .scaleProportionallyDown
-            iv.translatesAutoresizingMaskIntoConstraints = false
-            let tf = NSTextField(labelWithString: "")
-            tf.translatesAutoresizingMaskIntoConstraints = false
-            tf.lineBreakMode = .byTruncatingTail
-            c.addSubview(iv); c.addSubview(tf)
-            c.imageView = iv; c.textField = tf
-            NSLayoutConstraint.activate([
-                iv.widthAnchor.constraint(equalToConstant: 13),
-                iv.heightAnchor.constraint(equalToConstant: 13),
-                iv.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
-                iv.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-                tf.leadingAnchor.constraint(equalTo: iv.trailingAnchor, constant: 7),
-                tf.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
-                tf.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-            ])
-            c.identifier = id
-            return c
-        }()
-        let pr = results[row]
-        cell.imageView?.image = ciImage(pr.ciState, palette: model.palette)
-        cell.textField?.attributedStringValue = Self.rowText(pr, palette: model.palette,
-                                                            freshness: model.freshness(pr),
-                                                            account: model.accountLabel(for: pr))
-        cell.textField?.toolTip = pr.waitReason.map { "Waiting on you — \($0.panelLabel)" }
+        let cell = (tableView.makeView(withIdentifier: PRSearchCellView.reuseIdentifier, owner: self) as? PRSearchCellView)
+            ?? PRSearchCellView(frame: .zero)
+        cell.identifier = PRSearchCellView.reuseIdentifier
+        guard results.indices.contains(row) else { return cell }
+        cell.configure(with: results[row], model: model)
         return cell
-    }
-
-    /// Same visual language as the panel card and the menu row: dimmed
-    /// repo#number, full-strength title, reason in its own color.
-    private static func rowText(_ pr: PullRequest, palette: Palette?,
-                                freshness: PRFreshness?, account: String?) -> NSAttributedString {
-        let dim = palette?.subtext ?? NSColor.secondaryLabelColor
-        let s = NSMutableAttributedString(string: "", attributes: [.foregroundColor: dim])
-        s.append(NSAttributedString(string: accountTag(account), attributes: [.foregroundColor: dim]))
-        s.append(NSAttributedString(string: "\(pr.repoFullName)#\(pr.number)  ",
-                                    attributes: [.foregroundColor: dim]))
-        s.append(NSAttributedString(string: pr.title,
-                                    attributes: [.foregroundColor: palette?.text ?? NSColor.labelColor]))
-        let tagFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        if let reason = pr.waitReason {
-            s.append(NSAttributedString(
-                string: "  \(reason.panelLabel)",
-                attributes: [.foregroundColor: reasonColor(reason, palette: palette), .font: tagFont]))
-        }
-        if let freshness, let text = freshness.pillLabel {
-            s.append(NSAttributedString(
-                string: "  \(text)",
-                attributes: [.foregroundColor: freshnessColor(freshness, palette: palette), .font: tagFont]))
-        }
-        return s
     }
 
     // Live filter as the user types.
@@ -170,7 +171,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         reload()
     }
 
-    /// Focus starts in the field, so Esc and ↑↓ have to work from there too —
+    /// Focus starts in the field, so Esc, Enter, and ↑↓ have to work from there too —
     /// NSSearchField otherwise eats Esc to clear the text and never closes.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         switch sel {
@@ -288,6 +289,155 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
             menu.addItem(snooze)
         }
         return menu
+    }
+}
+
+/// Dedicated, high-performance two-line cell for PR search results.
+/// Never overlaps: lines are strictly pinned to 1 line each with tail truncation.
+private final class PRSearchCellView: NSTableCellView {
+    static let reuseIdentifier = NSUserInterfaceItemIdentifier("PRSearchCell")
+
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let repoLabel = NSTextField(labelWithString: "")
+    private let authorLabel = NSTextField(labelWithString: "")
+    private let accountBadge = makePill()
+    private let reasonBadge = makePill()
+    private let freshnessBadge = makePill()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setupViews()
+    }
+    required init?(coder: NSCoder) { fatalError("not from nib") }
+
+    private static func makePill() -> (view: NSView, label: NSTextField) {
+        let pill = NSView()
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 5
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.setContentHuggingPriority(.required, for: .horizontal)
+
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.maximumNumberOfLines = 1
+        label.usesSingleLineMode = true
+        label.cell?.wraps = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            pill.heightAnchor.constraint(equalToConstant: 15),
+            label.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -5),
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+        ])
+        return (pill, label)
+    }
+
+    private func setupViews() {
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.imageScaling = .scaleProportionallyDown
+
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.maximumNumberOfLines = 1
+        titleLabel.usesSingleLineMode = true
+        titleLabel.cell?.wraps = false
+        titleLabel.cell?.isScrollable = true
+
+        repoLabel.translatesAutoresizingMaskIntoConstraints = false
+        repoLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        repoLabel.textColor = .secondaryLabelColor
+        repoLabel.lineBreakMode = .byTruncatingTail
+        repoLabel.maximumNumberOfLines = 1
+        repoLabel.usesSingleLineMode = true
+        repoLabel.cell?.wraps = false
+        repoLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        authorLabel.translatesAutoresizingMaskIntoConstraints = false
+        authorLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        authorLabel.textColor = .secondaryLabelColor
+        authorLabel.lineBreakMode = .byTruncatingTail
+        authorLabel.maximumNumberOfLines = 1
+        authorLabel.usesSingleLineMode = true
+        authorLabel.cell?.wraps = false
+        authorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let metaStack = NSStackView(views: [repoLabel, authorLabel, accountBadge.view, reasonBadge.view, freshnessBadge.view])
+        metaStack.translatesAutoresizingMaskIntoConstraints = false
+        metaStack.orientation = .horizontal
+        metaStack.spacing = 6
+        metaStack.alignment = .centerY
+
+        addSubview(iconView)
+        addSubview(titleLabel)
+        addSubview(metaStack)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            iconView.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            iconView.widthAnchor.constraint(equalToConstant: 15),
+            iconView.heightAnchor.constraint(equalToConstant: 15),
+
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+
+            metaStack.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            metaStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            metaStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 3),
+        ])
+    }
+
+    func configure(with pr: PullRequest, model: AppModel) {
+        let p = model.palette
+        iconView.image = ciImage(pr.ciState, palette: p)
+
+        let cleanTitle = pr.title.components(separatedBy: .newlines).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        titleLabel.stringValue = cleanTitle
+        titleLabel.textColor = p?.text ?? .labelColor
+
+        repoLabel.stringValue = "\(pr.repoFullName)#\(pr.number)"
+        repoLabel.textColor = p?.subtext ?? .secondaryLabelColor
+
+        authorLabel.stringValue = "by \(pr.author)"
+        authorLabel.textColor = (p?.subtext ?? .secondaryLabelColor).withAlphaComponent(0.8)
+
+        if let acct = model.accountLabel(for: pr) {
+            accountBadge.label.stringValue = acct
+            let c = p?.subtext ?? .secondaryLabelColor
+            accountBadge.label.textColor = c
+            accountBadge.view.layer?.backgroundColor = c.withAlphaComponent(0.14).cgColor
+            accountBadge.view.isHidden = false
+        } else {
+            accountBadge.view.isHidden = true
+        }
+
+        if let reason = pr.waitReason {
+            reasonBadge.label.stringValue = reason.panelLabel
+            let c = reasonColor(reason, palette: p)
+            reasonBadge.label.textColor = c
+            reasonBadge.view.layer?.backgroundColor = c.withAlphaComponent(0.16).cgColor
+            reasonBadge.view.isHidden = false
+        } else {
+            reasonBadge.view.isHidden = true
+        }
+
+        let freshness = model.freshness(pr)
+        if let text = freshness?.pillLabel, let f = freshness {
+            freshnessBadge.label.stringValue = text
+            let c = freshnessColor(f, palette: p)
+            freshnessBadge.label.textColor = c
+            freshnessBadge.view.layer?.backgroundColor = c.withAlphaComponent(0.16).cgColor
+            freshnessBadge.view.isHidden = false
+        } else {
+            freshnessBadge.view.isHidden = true
+        }
+
+        toolTip = "\(pr.repoFullName)#\(pr.number)\n\(cleanTitle)\nAuthor: \(pr.author)"
     }
 }
 

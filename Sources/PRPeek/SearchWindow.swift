@@ -45,9 +45,6 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.placeholderString = "Filter by repo, number, title, or author"
         searchField.delegate = self
-        searchField.target = self
-        searchField.action = #selector(openSelected)   // Enter in the field opens the top hit
-        searchField.sendsWholeSearchString = false
 
         countLabel.font = .systemFont(ofSize: 11)
         countLabel.textColor = .secondaryLabelColor
@@ -177,6 +174,8 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     /// NSSearchField otherwise eats Esc to clear the text and never closes.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         switch sel {
+        case #selector(NSResponder.insertNewline(_:)):
+            openSelected(); return true
         case #selector(NSResponder.cancelOperation(_:)):
             hide(); return true
         case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)):

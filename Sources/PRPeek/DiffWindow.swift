@@ -3,7 +3,8 @@ import PRPeekCore
 
 /// Dedicated, high-performance native Diff Viewer window for PRPeek.
 /// Supports Side-by-Side and Inline views, intra-line word delta highlighting,
-/// inline review comments overlay, hunk-to-hunk navigation (J/K), and file viewed checkmarks (V).
+/// inline review comments overlay, hunk-to-hunk navigation (J/K), file viewed checkmarks (V),
+/// in-diff search (⌘F), whitespace ignore toggle (W), breadcrumbs, syntax tinting, and GitHub permalinks (⌥C).
 @MainActor
 final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     enum ViewMode: Int {
@@ -30,6 +31,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
     private let model: AppModel
     private var window: NSWindow?
+    private var keyMonitor: Any?
 
     private var currentPR: PullRequest?
     private var allFiles: [PullRequestFile] = []
@@ -42,10 +44,26 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     private var currentFileComments: [ReviewComment] = []
     private var tableRows: [DiffTableRow] = []
 
-    // Navigation & Viewed State
+    // Navigation, Viewed & Whitespace State
     private var hunkRowIndices: [Int] = []
     private var currentHunkIndex: Int = 0
     private var viewedFilePaths: Set<String> = []
+
+    private var ignoreWhitespace: Bool {
+        get { UserDefaults.standard.bool(forKey: "diffIgnoreWhitespace") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "diffIgnoreWhitespace")
+            updateWhitespaceBtn()
+            reparseCurrentFile()
+        }
+    }
+
+    // In-Diff Search State
+    private let searchBar = DiffSearchBarView()
+    private var searchBarHeightConstraint: NSLayoutConstraint?
+    private var currentSearchQuery: String = ""
+    private var searchMatchRowIndices: [Int] = []
+    private var currentSearchMatchIndex: Int = 0
 
     // UI Elements
     private let splitView = NSSplitView()
@@ -58,6 +76,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     private let statsBadge = makePill()
     private let viewedBadge = makePill()
     private let hunkBadge = makePill()
+    private let whitespaceBtn = NSButton()
     private let modeControl = NSSegmentedControl()
 
     private let currentFilePathLabel = NSTextField(labelWithString: "")
@@ -125,6 +144,18 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         repoBadge.label.textColor = accent
         repoBadge.view.layer?.backgroundColor = accent.withAlphaComponent(0.14).cgColor
         updateViewedProgress()
+        updateWhitespaceBtn()
+    }
+
+    private func updateWhitespaceBtn() {
+        let active = ignoreWhitespace
+        whitespaceBtn.state = active ? .on : .off
+        whitespaceBtn.title = active ? "␣ Whitespace Ignored" : "␣ Ignore Whitespace"
+        if active {
+            whitespaceBtn.contentTintColor = model.palette?.blue ?? .systemBlue
+        } else {
+            whitespaceBtn.contentTintColor = .secondaryLabelColor
+        }
     }
 
     private func updateViewedProgress() {
@@ -225,7 +256,27 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         fileTable.scrollRowToVisible(index)
 
         let file = filteredFiles[index]
-        currentFilePathLabel.stringValue = file.filename
+
+        // Format file path with dimmed directory breadcrumb and bold base filename
+        let pathAttr = NSMutableAttributedString()
+        if !file.directoryPath.isEmpty {
+            pathAttr.append(NSAttributedString(string: file.directoryPath, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]))
+        }
+        pathAttr.append(NSAttributedString(string: file.baseFilename, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: model.palette?.text ?? NSColor.labelColor
+        ]))
+        if let rename = file.renameDescription {
+            pathAttr.append(NSAttributedString(string: "  (\(rename))", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: model.palette?.yellow ?? NSColor.systemOrange
+            ]))
+        }
+        currentFilePathLabel.attributedStringValue = pathAttr
+
         currentFileStatusBadge.label.stringValue = file.status.displayLabel
         let statusColor: NSColor
         switch file.status {
@@ -246,8 +297,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         }
 
         if let patch = file.patch {
-            currentUnifiedLines = DiffParser.parseUnified(patch: patch)
-            currentSideBySideRows = DiffParser.parseSideBySide(patch: patch)
+            currentUnifiedLines = DiffParser.parseUnified(patch: patch, ignoreWhitespace: ignoreWhitespace)
+            currentSideBySideRows = DiffParser.parseSideBySide(patch: patch, ignoreWhitespace: ignoreWhitespace)
             emptyStateLabel.isHidden = true
         } else {
             currentUnifiedLines = []
@@ -259,6 +310,24 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         rebuildTableRows()
         if !tableRows.isEmpty {
             diffTable.scrollRowToVisible(0)
+        }
+
+        if !currentSearchQuery.isEmpty {
+            updateSearch(query: currentSearchQuery)
+        }
+    }
+
+    private func reparseCurrentFile() {
+        guard filteredFiles.indices.contains(selectedFileIndex) else { return }
+        let file = filteredFiles[selectedFileIndex]
+        if let patch = file.patch {
+            currentUnifiedLines = DiffParser.parseUnified(patch: patch, ignoreWhitespace: ignoreWhitespace)
+            currentSideBySideRows = DiffParser.parseSideBySide(patch: patch, ignoreWhitespace: ignoreWhitespace)
+            emptyStateLabel.isHidden = true
+        }
+        rebuildTableRows()
+        if !currentSearchQuery.isEmpty {
+            updateSearch(query: currentSearchQuery)
         }
     }
 
@@ -352,15 +421,98 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         updateViewedProgress()
     }
 
+    private func toggleIgnoreWhitespace() {
+        ignoreWhitespace.toggle()
+    }
+
+    // MARK: - In-Diff Search Methods
+
+    private func toggleSearchBar() {
+        if searchBar.isHidden {
+            searchBar.isHidden = false
+            searchBarHeightConstraint?.constant = 34
+            window?.makeFirstResponder(searchBar.searchField)
+            searchBar.searchField.selectText(nil)
+            if !searchBar.searchField.stringValue.isEmpty {
+                updateSearch(query: searchBar.searchField.stringValue)
+            }
+        } else {
+            closeSearchBar()
+        }
+    }
+
+    private func closeSearchBar() {
+        searchBar.isHidden = true
+        searchBarHeightConstraint?.constant = 0
+        searchBar.searchField.stringValue = ""
+        currentSearchQuery = ""
+        searchMatchRowIndices = []
+        searchBar.matchLabel.stringValue = ""
+        window?.makeFirstResponder(diffTable)
+        diffTable.reloadData()
+    }
+
+    private func updateSearch(query: String) {
+        currentSearchQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchMatchRowIndices = []
+        currentSearchMatchIndex = 0
+
+        guard !currentSearchQuery.isEmpty else {
+            searchBar.matchLabel.stringValue = ""
+            diffTable.reloadData()
+            return
+        }
+
+        let q = currentSearchQuery.lowercased()
+        for (i, row) in tableRows.enumerated() {
+            switch row {
+            case .unified(let line):
+                if line.text.lowercased().contains(q) {
+                    searchMatchRowIndices.append(i)
+                }
+            case .sideBySide(let sbs):
+                if sbs.left.text.lowercased().contains(q) || sbs.right.text.lowercased().contains(q) {
+                    searchMatchRowIndices.append(i)
+                }
+            case .reviewComment(let c):
+                if c.body.lowercased().contains(q) || c.author.lowercased().contains(q) {
+                    searchMatchRowIndices.append(i)
+                }
+            }
+        }
+
+        if searchMatchRowIndices.isEmpty {
+            searchBar.matchLabel.stringValue = "0 matches"
+        } else {
+            searchBar.matchLabel.stringValue = "1 of \(searchMatchRowIndices.count)"
+            diffTable.scrollRowToVisible(searchMatchRowIndices[0])
+        }
+        diffTable.reloadData()
+    }
+
+    private func searchNext() {
+        guard !searchMatchRowIndices.isEmpty else { return }
+        currentSearchMatchIndex = (currentSearchMatchIndex + 1) % searchMatchRowIndices.count
+        searchBar.matchLabel.stringValue = "\(currentSearchMatchIndex + 1) of \(searchMatchRowIndices.count)"
+        diffTable.scrollRowToVisible(searchMatchRowIndices[currentSearchMatchIndex])
+    }
+
+    private func searchPrev() {
+        guard !searchMatchRowIndices.isEmpty else { return }
+        currentSearchMatchIndex = (currentSearchMatchIndex - 1 + searchMatchRowIndices.count) % searchMatchRowIndices.count
+        searchBar.matchLabel.stringValue = "\(currentSearchMatchIndex + 1) of \(searchMatchRowIndices.count)"
+        diffTable.scrollRowToVisible(searchMatchRowIndices[currentSearchMatchIndex])
+    }
+
     // MARK: - Window Construction
 
     private func makeWindow() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 720),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 740),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.setFrameAutosaveName("PRPeekDiffWindow")
-        w.minSize = NSSize(width: 760, height: 480)
+        w.minSize = NSSize(width: 800, height: 500)
         w.center()
         w.delegate = self
         w.appearance = model.theme.nsAppearance
@@ -388,7 +540,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         splitView.addSubview(rightPane)
 
         // Adjust split position
-        splitView.setPosition(270, ofDividerAt: 0)
+        splitView.setPosition(280, ofDividerAt: 0)
 
         NSLayoutConstraint.activate([
             headerView.topAnchor.constraint(equalTo: content.topAnchor),
@@ -414,6 +566,15 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        whitespaceBtn.setButtonType(.pushOnPushOff)
+        whitespaceBtn.bezelStyle = .inline
+        whitespaceBtn.font = .systemFont(ofSize: 11, weight: .medium)
+        whitespaceBtn.target = self
+        whitespaceBtn.action = #selector(toggleWhitespaceClicked)
+        whitespaceBtn.toolTip = "Toggle Ignore Whitespace (W)"
+        whitespaceBtn.translatesAutoresizingMaskIntoConstraints = false
+        updateWhitespaceBtn()
+
         modeControl.segmentCount = 2
         modeControl.setLabel("◫ Side-by-Side", forSegment: 0)
         modeControl.setLabel("☰ Inline", forSegment: 1)
@@ -434,6 +595,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         bar.addSubview(statsBadge.view)
         bar.addSubview(viewedBadge.view)
         bar.addSubview(hunkBadge.view)
+        bar.addSubview(whitespaceBtn)
         bar.addSubview(modeControl)
         bar.addSubview(openBrowserBtn)
 
@@ -456,8 +618,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             viewedBadge.view.trailingAnchor.constraint(equalTo: hunkBadge.view.leadingAnchor, constant: -8),
             viewedBadge.view.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
 
-            hunkBadge.view.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -12),
+            hunkBadge.view.trailingAnchor.constraint(equalTo: whitespaceBtn.leadingAnchor, constant: -10),
             hunkBadge.view.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+
+            whitespaceBtn.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -10),
+            whitespaceBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
 
             modeControl.trailingAnchor.constraint(equalTo: openBrowserBtn.leadingAnchor, constant: -10),
             modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
@@ -498,6 +663,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         fileTable.target = self
         fileTable.action = #selector(fileSelected)
         fileTable.onEscape = { [weak self] in self?.hide() }
+        fileTable.contextMenuProvider = { [weak self] in self?.makeFileContextMenu() }
 
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -536,6 +702,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         currentFilePathLabel.isSelectable = true
         currentFilePathLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        let findBtn = NSButton(image: Self.symbol("magnifyingglass"), target: self, action: #selector(toggleFindClicked))
+        findBtn.isBordered = false
+        findBtn.toolTip = "Find in Diff (⌘F)"
+        findBtn.translatesAutoresizingMaskIntoConstraints = false
+
         let toggleViewedBtn = NSButton(title: "Mark Viewed (V)", target: self, action: #selector(toggleViewedClicked))
         toggleViewedBtn.bezelStyle = .inline
         toggleViewedBtn.font = .systemFont(ofSize: 11, weight: .medium)
@@ -548,6 +719,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
         fileBar.addSubview(currentFileStatusBadge.view)
         fileBar.addSubview(currentFilePathLabel)
+        fileBar.addSubview(findBtn)
         fileBar.addSubview(toggleViewedBtn)
         fileBar.addSubview(copyPathBtn)
 
@@ -557,7 +729,12 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
             currentFilePathLabel.leadingAnchor.constraint(equalTo: currentFileStatusBadge.view.trailingAnchor, constant: 8),
             currentFilePathLabel.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
-            currentFilePathLabel.trailingAnchor.constraint(lessThanOrEqualTo: toggleViewedBtn.leadingAnchor, constant: -8),
+            currentFilePathLabel.trailingAnchor.constraint(lessThanOrEqualTo: findBtn.leadingAnchor, constant: -8),
+
+            findBtn.trailingAnchor.constraint(equalTo: toggleViewedBtn.leadingAnchor, constant: -8),
+            findBtn.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
+            findBtn.widthAnchor.constraint(equalToConstant: 20),
+            findBtn.heightAnchor.constraint(equalToConstant: 20),
 
             toggleViewedBtn.trailingAnchor.constraint(equalTo: copyPathBtn.leadingAnchor, constant: -8),
             toggleViewedBtn.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
@@ -568,11 +745,22 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             copyPathBtn.heightAnchor.constraint(equalToConstant: 20),
         ])
 
+        // In-Diff Search Bar
+        searchBar.translatesAutoresizingMaskIntoConstraints = false
+        searchBar.isHidden = true
+        searchBar.onQueryChanged = { [weak self] q in self?.updateSearch(query: q) }
+        searchBar.onNext = { [weak self] in self?.searchNext() }
+        searchBar.onPrev = { [weak self] in self?.searchPrev() }
+        searchBar.onClose = { [weak self] in self?.closeSearchBar() }
+
+        let searchHeight = searchBar.heightAnchor.constraint(equalToConstant: 0)
+        self.searchBarHeightConstraint = searchHeight
+
         diffTable.headerView = nil
         diffTable.rowHeight = 20
         diffTable.style = .plain
         diffTable.intercellSpacing = .zero
-        diffTable.selectionHighlightStyle = .none
+        diffTable.selectionHighlightStyle = .regular
         let col = NSTableColumn(identifier: .init("diff"))
         col.resizingMask = .autoresizingMask
         diffTable.addTableColumn(col)
@@ -580,6 +768,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         diffTable.dataSource = self
         diffTable.delegate = self
         diffTable.onEscape = { [weak self] in self?.hide() }
+        diffTable.contextMenuProvider = { [weak self] in self?.makeDiffContextMenu() }
 
         let diffScroll = NSScrollView()
         diffScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -599,6 +788,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         progressIndicator.translatesAutoresizingMaskIntoConstraints = false
 
         pane.addSubview(fileBar)
+        pane.addSubview(searchBar)
         pane.addSubview(diffScroll)
         pane.addSubview(emptyStateLabel)
         pane.addSubview(progressIndicator)
@@ -609,7 +799,12 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             fileBar.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
             fileBar.heightAnchor.constraint(equalToConstant: 32),
 
-            diffScroll.topAnchor.constraint(equalTo: fileBar.bottomAnchor),
+            searchBar.topAnchor.constraint(equalTo: fileBar.bottomAnchor),
+            searchBar.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
+            searchBar.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
+            searchHeight,
+
+            diffScroll.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
             diffScroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
             diffScroll.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
             diffScroll.bottomAnchor.constraint(equalTo: pane.bottomAnchor),
@@ -641,6 +836,14 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         toggleViewedCurrentFile()
     }
 
+    @objc private func toggleFindClicked() {
+        toggleSearchBar()
+    }
+
+    @objc private func toggleWhitespaceClicked() {
+        toggleIgnoreWhitespace()
+    }
+
     @objc private func copyCurrentPath() {
         guard filteredFiles.indices.contains(selectedFileIndex) else { return }
         let path = filteredFiles[selectedFileIndex].filename
@@ -656,10 +859,146 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         selectFile(at: fileTable.selectedRow)
     }
 
-    // Keyboard Shortcuts
+    // MARK: - Context Menus
+
+    private func makeDiffContextMenu() -> NSMenu? {
+        guard filteredFiles.indices.contains(selectedFileIndex) else { return nil }
+        let file = filteredFiles[selectedFileIndex]
+        let selRow = diffTable.selectedRow
+        guard selRow >= 0 && selRow < tableRows.count else { return nil }
+
+        let menu = NSMenu()
+        let rowItem = tableRows[selRow]
+        var lineNum: Int? = nil
+        var lineText: String = ""
+
+        switch rowItem {
+        case .unified(let line):
+            lineNum = line.newLineNumber ?? line.oldLineNumber
+            lineText = line.text
+        case .sideBySide(let sbs):
+            lineNum = sbs.right.lineNumber ?? sbs.left.lineNumber
+            lineText = sbs.right.text.isEmpty ? sbs.left.text : sbs.right.text
+        case .reviewComment(let c):
+            lineNum = c.fileAndLine?.line
+            lineText = c.body
+        }
+
+        // 1. Copy GitHub Permalink
+        if let pr = currentPR, let permalink = file.githubPermalink(repoFullName: pr.repoFullName, prNumber: pr.number, lineNumber: lineNum) {
+            let item = NSMenuItem(title: lineNum != nil ? "Copy GitHub Permalink (Line \(lineNum!))" : "Copy GitHub Permalink", action: #selector(copyURLItemAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = permalink.absoluteString
+            item.image = Self.symbol("link")
+            menu.addItem(item)
+
+            let openItem = NSMenuItem(title: "Open Line on GitHub", action: #selector(openURLItemAction(_:)), keyEquivalent: "")
+            openItem.target = self
+            openItem.representedObject = permalink
+            openItem.image = Self.symbol("arrow.up.right.square")
+            menu.addItem(openItem)
+        }
+
+        // 2. Copy Relative File Path
+        let pathItem = NSMenuItem(title: "Copy File Path", action: #selector(copyTextItemAction(_:)), keyEquivalent: "")
+        pathItem.target = self
+        pathItem.representedObject = file.filename
+        pathItem.image = Self.symbol("doc.on.doc")
+        menu.addItem(pathItem)
+
+        // 3. Copy Line Content
+        if !lineText.isEmpty {
+            let textItem = NSMenuItem(title: "Copy Line Content", action: #selector(copyTextItemAction(_:)), keyEquivalent: "")
+            textItem.target = self
+            textItem.representedObject = lineText
+            textItem.image = Self.symbol("doc.text")
+            menu.addItem(textItem)
+        }
+
+        return menu
+    }
+
+    private func makeFileContextMenu() -> NSMenu? {
+        let selRow = fileTable.selectedRow
+        guard filteredFiles.indices.contains(selRow) else { return nil }
+        let file = filteredFiles[selRow]
+        let menu = NSMenu()
+
+        let pathItem = NSMenuItem(title: "Copy File Path", action: #selector(copyTextItemAction(_:)), keyEquivalent: "")
+        pathItem.target = self
+        pathItem.representedObject = file.filename
+        pathItem.image = Self.symbol("doc.on.doc")
+        menu.addItem(pathItem)
+
+        if let pr = currentPR, let permalink = file.githubPermalink(repoFullName: pr.repoFullName, prNumber: pr.number) {
+            let urlItem = NSMenuItem(title: "Copy GitHub Diff Link", action: #selector(copyURLItemAction(_:)), keyEquivalent: "")
+            urlItem.target = self
+            urlItem.representedObject = permalink.absoluteString
+            urlItem.image = Self.symbol("link")
+            menu.addItem(urlItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        let isViewed = viewedFilePaths.contains(file.filename)
+        let toggleItem = NSMenuItem(title: isViewed ? "Mark as Unviewed" : "Mark as Viewed", action: #selector(toggleSelectedFileViewed), keyEquivalent: "")
+        toggleItem.target = self
+        toggleItem.image = Self.symbol(isViewed ? "circle" : "checkmark.circle.fill")
+        menu.addItem(toggleItem)
+
+        return menu
+    }
+
+    @objc private func copyURLItemAction(_ sender: NSMenuItem) {
+        guard let str = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(str, forType: .string)
+    }
+
+    @objc private func openURLItemAction(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.openSafeWebURL(url)
+    }
+
+    @objc private func copyTextItemAction(_ sender: NSMenuItem) {
+        guard let str = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(str, forType: .string)
+    }
+
+    @objc private func toggleSelectedFileViewed() {
+        let selRow = fileTable.selectedRow
+        guard filteredFiles.indices.contains(selRow) else { return }
+        toggleViewed(for: filteredFiles[selRow])
+    }
+
+    private func copyPermalinkForSelectedOrCurrent() {
+        guard filteredFiles.indices.contains(selectedFileIndex), let pr = currentPR else { return }
+        let file = filteredFiles[selectedFileIndex]
+        var lineNum: Int? = nil
+        let selRow = diffTable.selectedRow
+        if selRow >= 0 && selRow < tableRows.count {
+            switch tableRows[selRow] {
+            case .unified(let line): lineNum = line.newLineNumber ?? line.oldLineNumber
+            case .sideBySide(let sbs): lineNum = sbs.right.lineNumber ?? sbs.left.lineNumber
+            case .reviewComment(let c): lineNum = c.fileAndLine?.line
+            }
+        }
+        if let permalink = file.githubPermalink(repoFullName: pr.repoFullName, prNumber: pr.number, lineNumber: lineNum) {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(permalink.absoluteString, forType: .string)
+        }
+    }
+
+    // MARK: - Keyboard Monitoring & Window Delegate
+
     func windowDidBecomeKey(_ notification: Notification) {
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.isVisible else { return event }
+
+            let isTyping = (self.window?.firstResponder as? NSTextView) != nil
+
             if event.modifierFlags.contains(.command) {
                 if event.charactersIgnoringModifiers == "1" {
                     self.viewMode = .sideBySide; return nil
@@ -669,14 +1008,18 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
                     self.hide(); return nil
                 } else if event.charactersIgnoringModifiers == "o" {
                     self.openOnGitHub(); return nil
+                } else if event.charactersIgnoringModifiers == "f" {
+                    self.toggleSearchBar(); return nil
                 }
             } else if event.modifierFlags.contains(.option) {
                 if event.keyCode == 125 { // Option+Down
                     self.jumpToNextHunk(); return nil
                 } else if event.keyCode == 126 { // Option+Up
                     self.jumpToPrevHunk(); return nil
+                } else if event.charactersIgnoringModifiers == "c" {
+                    self.copyPermalinkForSelectedOrCurrent(); return nil
                 }
-            } else {
+            } else if !isTyping {
                 if event.keyCode == 48 { // Tab
                     self.viewMode = self.viewMode == .sideBySide ? .inline : .sideBySide
                     return nil
@@ -686,6 +1029,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
                     self.jumpToPrevHunk(); return nil
                 } else if event.charactersIgnoringModifiers == "v" {
                     self.toggleViewedCurrentFile(); return nil
+                } else if event.charactersIgnoringModifiers == "w" {
+                    self.toggleIgnoreWhitespace(); return nil
                 } else if event.keyCode == 30 { // ] -> Next file
                     if self.selectedFileIndex < self.filteredFiles.count - 1 {
                         self.selectFile(at: self.selectedFileIndex + 1)
@@ -699,6 +1044,13 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
                 }
             }
             return event
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
         }
     }
 
@@ -721,7 +1073,6 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         case .unified, .sideBySide:
             return 20
         case .reviewComment(let comment):
-            // Dynamic comfortable height for comment cards
             let lines = max(1, comment.body.components(separatedBy: "\n").count)
             return min(CGFloat(40 + lines * 16), 140)
         }
@@ -746,19 +1097,19 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
                 let cell = (tableView.makeView(withIdentifier: .init("inlineCell"), owner: self) as? InlineDiffCellView)
                     ?? InlineDiffCellView(frame: .zero)
                 cell.identifier = .init("inlineCell")
-                cell.configure(line: line, palette: model.palette)
+                cell.configure(line: line, searchQuery: currentSearchQuery, palette: model.palette)
                 return cell
             case .sideBySide(let sbs):
                 let cell = (tableView.makeView(withIdentifier: .init("sbsCell"), owner: self) as? SideBySideDiffCellView)
                     ?? SideBySideDiffCellView(frame: .zero)
                 cell.identifier = .init("sbsCell")
-                cell.configure(row: sbs, palette: model.palette)
+                cell.configure(row: sbs, searchQuery: currentSearchQuery, palette: model.palette)
                 return cell
             case .reviewComment(let comment):
                 let cell = (tableView.makeView(withIdentifier: .init("commentCell"), owner: self) as? DiffCommentCellView)
                     ?? DiffCommentCellView(frame: .zero)
                 cell.identifier = .init("commentCell")
-                cell.configure(comment: comment, palette: model.palette)
+                cell.configure(comment: comment, searchQuery: currentSearchQuery, palette: model.palette)
                 return cell
             }
         }
@@ -775,20 +1126,35 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         updateViewedProgress()
     }
 
-    // MARK: - Attributed Text Token Helper
+    // MARK: - Attributed Text Token & Keyword Helper
 
-    static func makeAttributedText(tokens: [DiffToken]?, plainText: String, isAddition: Bool, isDeletion: Bool, palette: Palette?) -> NSAttributedString {
+    private static let syntaxKeywords: Set<String> = [
+        "func", "let", "var", "class", "struct", "enum", "actor", "protocol", "extension",
+        "init", "deinit", "subscript", "typealias", "associatedtype",
+        "import", "export", "return", "if", "else", "guard", "switch", "case", "default",
+        "for", "while", "repeat", "break", "continue", "fallthrough",
+        "do", "try", "catch", "throw", "throws", "rethrows", "defer",
+        "async", "await", "public", "private", "fileprivate", "internal", "open", "static",
+        "mutating", "nonisolated", "override", "final", "self", "Self", "super",
+        "true", "false", "nil", "null", "undefined",
+        "def", "lambda", "elif", "except", "finally", "with", "as", "from", "pass", "yield",
+        "const", "function", "interface", "declare", "module", "namespace"
+    ]
+
+    static func makeAttributedText(
+        tokens: [DiffToken]?,
+        plainText: String,
+        isAddition: Bool,
+        isDeletion: Bool,
+        searchQuery: String? = nil,
+        palette: Palette?
+    ) -> NSAttributedString {
         let baseFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
         let textColor = palette?.text ?? .labelColor
-
-        guard let tokens, !tokens.isEmpty else {
-            return NSAttributedString(string: plainText, attributes: [
-                .font: baseFont,
-                .foregroundColor: textColor
-            ])
-        }
+        let keywordColor = palette?.mauve ?? NSColor(red: 0.72, green: 0.45, blue: 0.85, alpha: 1.0)
 
         let result = NSMutableAttributedString()
+
         let highlightBg: NSColor
         if isAddition {
             highlightBg = (palette?.green ?? .systemGreen).withAlphaComponent(0.35)
@@ -798,16 +1164,44 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             highlightBg = .clear
         }
 
-        for token in tokens {
-            var attrs: [NSAttributedString.Key: Any] = [
-                .font: token.isChanged ? NSFont.monospacedSystemFont(ofSize: 11.5, weight: .bold) : baseFont,
-                .foregroundColor: textColor
-            ]
-            if token.isChanged {
-                attrs[.backgroundColor] = highlightBg
+        if let tokens, !tokens.isEmpty {
+            for token in tokens {
+                var attrs: [NSAttributedString.Key: Any] = [
+                    .font: token.isChanged ? NSFont.monospacedSystemFont(ofSize: 11.5, weight: .bold) : baseFont,
+                    .foregroundColor: textColor
+                ]
+                if token.isChanged {
+                    attrs[.backgroundColor] = highlightBg
+                } else if syntaxKeywords.contains(token.text) {
+                    attrs[.foregroundColor] = keywordColor
+                }
+                result.append(NSAttributedString(string: token.text, attributes: attrs))
             }
-            result.append(NSAttributedString(string: token.text, attributes: attrs))
+        } else {
+            result.append(NSAttributedString(string: plainText, attributes: [
+                .font: baseFont,
+                .foregroundColor: textColor
+            ]))
         }
+
+        // Apply search query highlight if present
+        if let query = searchQuery, !query.isEmpty {
+            let fullText = result.string as NSString
+            var searchRange = NSRange(location: 0, length: fullText.length)
+            while searchRange.location < fullText.length {
+                let foundRange = fullText.range(of: query, options: .caseInsensitive, range: searchRange)
+                if foundRange.location != NSNotFound {
+                    result.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.4), range: foundRange)
+                    result.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: foundRange)
+                    result.addAttribute(.underlineColor, value: NSColor.systemOrange, range: foundRange)
+                    let nextLoc = foundRange.location + foundRange.length
+                    searchRange = NSRange(location: nextLoc, length: fullText.length - nextLoc)
+                } else {
+                    break
+                }
+            }
+        }
+
         return result
     }
 
@@ -837,11 +1231,140 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         return (pill, label)
     }
 
-    private static func symbol(_ name: String) -> NSImage {
+    static func symbol(_ name: String) -> NSImage {
         let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) ?? NSImage()
         img.isTemplate = true
         return img
     }
+}
+
+// MARK: - In-Diff Search Bar View
+
+private final class DiffSearchBarView: NSView, NSSearchFieldDelegate {
+    let searchField = NSSearchField()
+    let prevButton = NSButton()
+    let nextButton = NSButton()
+    let matchLabel = NSTextField(labelWithString: "")
+    let closeButton = NSButton()
+
+    var onQueryChanged: ((String) -> Void)?
+    var onNext: (() -> Void)?
+    var onPrev: (() -> Void)?
+    var onClose: (() -> Void)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setup()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.95).cgColor
+
+        searchField.placeholderString = "Find in diff…"
+        searchField.font = .systemFont(ofSize: 12)
+        searchField.delegate = self
+        searchField.target = self
+        searchField.action = #selector(searchFieldAction)
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+
+        prevButton.image = NSImage(systemSymbolName: "chevron.up", accessibilityDescription: nil)
+        prevButton.isBordered = false
+        prevButton.toolTip = "Previous Match (⇧Enter)"
+        prevButton.target = self
+        prevButton.action = #selector(prevClicked)
+        prevButton.translatesAutoresizingMaskIntoConstraints = false
+
+        nextButton.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)
+        nextButton.isBordered = false
+        nextButton.toolTip = "Next Match (Enter)"
+        nextButton.target = self
+        nextButton.action = #selector(nextClicked)
+        nextButton.translatesAutoresizingMaskIntoConstraints = false
+
+        matchLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        matchLabel.textColor = .secondaryLabelColor
+        matchLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
+        closeButton.isBordered = false
+        closeButton.toolTip = "Close (Esc)"
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let bottomBorder = NSBox()
+        bottomBorder.boxType = .separator
+        bottomBorder.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(searchField)
+        addSubview(matchLabel)
+        addSubview(prevButton)
+        addSubview(nextButton)
+        addSubview(closeButton)
+        addSubview(bottomBorder)
+
+        NSLayoutConstraint.activate([
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            searchField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            searchField.widthAnchor.constraint(equalToConstant: 220),
+
+            matchLabel.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 8),
+            matchLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            prevButton.leadingAnchor.constraint(equalTo: matchLabel.trailingAnchor, constant: 8),
+            prevButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            prevButton.widthAnchor.constraint(equalToConstant: 20),
+            prevButton.heightAnchor.constraint(equalToConstant: 20),
+
+            nextButton.leadingAnchor.constraint(equalTo: prevButton.trailingAnchor, constant: 4),
+            nextButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            nextButton.widthAnchor.constraint(equalToConstant: 20),
+            nextButton.heightAnchor.constraint(equalToConstant: 20),
+
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 18),
+            closeButton.heightAnchor.constraint(equalToConstant: 18),
+
+            bottomBorder.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bottomBorder.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bottomBorder.bottomAnchor.constraint(equalTo: bottomAnchor),
+            bottomBorder.heightAnchor.constraint(equalToConstant: 1),
+        ])
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        onQueryChanged?(searchField.stringValue)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if NSEvent.modifierFlags.contains(.shift) {
+                onPrev?()
+            } else {
+                onNext?()
+            }
+            return true
+        } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            onClose?()
+            return true
+        }
+        return false
+    }
+
+    @objc private func searchFieldAction() {
+        if NSEvent.modifierFlags.contains(.shift) {
+            onPrev?()
+        } else {
+            onNext?()
+        }
+    }
+
+    @objc private func prevClicked() { onPrev?() }
+    @objc private func nextClicked() { onNext?() }
+    @objc private func closeClicked() { onClose?() }
 }
 
 // MARK: - Custom Views for Diff
@@ -928,12 +1451,46 @@ private final class DiffFileCellView: NSTableCellView {
         iconView.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)?
             .withSymbolConfiguration(cfg)
 
-        nameLabel.stringValue = (file.filename as NSString).lastPathComponent
-        nameLabel.toolTip = file.filename
-        nameLabel.textColor = isViewed ? (palette?.subtext ?? .secondaryLabelColor) : (palette?.text ?? .labelColor)
+        let nameAttr = NSMutableAttributedString()
+        if !file.directoryPath.isEmpty {
+            nameAttr.append(NSAttributedString(string: file.directoryPath, attributes: [
+                .font: NSFont.systemFont(ofSize: 10.5, weight: .regular),
+                .foregroundColor: isViewed ? (palette?.subtext ?? .tertiaryLabelColor) : .secondaryLabelColor
+            ]))
+        }
+        nameAttr.append(NSAttributedString(string: file.baseFilename, attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
+            .foregroundColor: isViewed ? (palette?.subtext ?? .secondaryLabelColor) : (palette?.text ?? .labelColor)
+        ]))
+        nameLabel.attributedStringValue = nameAttr
 
-        diffBadge.stringValue = "+\(file.additions) -\(file.deletions)"
-        diffBadge.textColor = palette?.subtext ?? .secondaryLabelColor
+        if let rename = file.renameDescription {
+            nameLabel.toolTip = rename
+        } else {
+            nameLabel.toolTip = file.filename
+        }
+
+        let badgeAttr = NSMutableAttributedString()
+        if file.additions > 0 {
+            badgeAttr.append(NSAttributedString(string: "+\(file.additions)", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: palette?.green ?? .systemGreen
+            ]))
+        }
+        if file.deletions > 0 {
+            if file.additions > 0 { badgeAttr.append(NSAttributedString(string: " ")) }
+            badgeAttr.append(NSAttributedString(string: "-\(file.deletions)", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: palette?.red ?? .systemRed
+            ]))
+        }
+        if file.additions == 0 && file.deletions == 0 {
+            badgeAttr.append(NSAttributedString(string: "0", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+                .foregroundColor: palette?.subtext ?? .secondaryLabelColor
+            ]))
+        }
+        diffBadge.attributedStringValue = badgeAttr
     }
 }
 
@@ -996,7 +1553,7 @@ private final class InlineDiffCellView: NSTableCellView {
         ])
     }
 
-    func configure(line: UnifiedDiffLine, palette: Palette?) {
+    func configure(line: UnifiedDiffLine, searchQuery: String? = nil, palette: Palette?) {
         oldNumLabel.stringValue = line.oldLineNumber.map(String.init) ?? ""
         newNumLabel.stringValue = line.newLineNumber.map(String.init) ?? ""
 
@@ -1005,6 +1562,7 @@ private final class InlineDiffCellView: NSTableCellView {
             plainText: line.text,
             isAddition: line.kind == .addition,
             isDeletion: line.kind == .deletion,
+            searchQuery: searchQuery,
             palette: palette
         )
 
@@ -1144,7 +1702,7 @@ private final class SideBySideDiffCellView: NSTableCellView {
         ])
     }
 
-    func configure(row: SideBySideDiffRow, palette: Palette?) {
+    func configure(row: SideBySideDiffRow, searchQuery: String? = nil, palette: Palette?) {
         if row.isHunkHeader {
             hunkHeaderLabel.stringValue = row.hunkHeaderText ?? ""
             hunkHeaderLabel.isHidden = false
@@ -1178,6 +1736,7 @@ private final class SideBySideDiffCellView: NSTableCellView {
             plainText: row.left.text,
             isAddition: false,
             isDeletion: row.left.kind == .deletion,
+            searchQuery: searchQuery,
             palette: palette
         )
 
@@ -1196,6 +1755,7 @@ private final class SideBySideDiffCellView: NSTableCellView {
             plainText: row.right.text,
             isAddition: row.right.kind == .addition,
             isDeletion: false,
+            searchQuery: searchQuery,
             palette: palette
         )
 
@@ -1283,9 +1843,9 @@ private final class DiffCommentCellView: NSTableCellView {
         }
     }
 
-    func configure(comment: ReviewComment, palette: Palette?) {
+    func configure(comment: ReviewComment, searchQuery: String? = nil, palette: Palette?) {
         commentURL = comment.htmlURL
-        authorLabel.stringValue = comment.author
+        authorLabel.stringValue = "@\(comment.author)"
         authorLabel.textColor = palette?.text ?? .labelColor
 
         switch comment.verdict {
@@ -1300,7 +1860,24 @@ private final class DiffCommentCellView: NSTableCellView {
             verdictBadge.textColor = palette?.blue ?? .systemBlue
         }
 
-        bodyLabel.stringValue = comment.body
-        bodyLabel.textColor = palette?.text ?? .labelColor
+        let bodyAttr = NSMutableAttributedString(string: comment.body, attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .regular),
+            .foregroundColor: palette?.text ?? NSColor.labelColor
+        ])
+        if let query = searchQuery, !query.isEmpty {
+            let full = comment.body as NSString
+            var range = NSRange(location: 0, length: full.length)
+            while range.location < full.length {
+                let found = full.range(of: query, options: .caseInsensitive, range: range)
+                if found.location != NSNotFound {
+                    bodyAttr.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.4), range: found)
+                    let next = found.location + found.length
+                    range = NSRange(location: next, length: full.length - next)
+                } else {
+                    break
+                }
+            }
+        }
+        bodyLabel.attributedStringValue = bodyAttr
     }
 }

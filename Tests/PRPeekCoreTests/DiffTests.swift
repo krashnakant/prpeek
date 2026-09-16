@@ -177,4 +177,66 @@ final class DiffTests: XCTestCase {
                                location: nil, createdAt: Date(), htmlURL: nil)
         XCTAssertNil(c2.fileAndLine)
     }
+
+    func test_file_path_helpers() {
+        let f1 = PullRequestFile(
+            id: "1", filename: "Sources/PRPeekCore/Diff.swift", previousFilename: nil,
+            status: .modified, additions: 10, deletions: 2, changes: 12, patch: nil
+        )
+        XCTAssertEqual(f1.directoryPath, "Sources/PRPeekCore/")
+        XCTAssertEqual(f1.baseFilename, "Diff.swift")
+        XCTAssertEqual(f1.fileExtension, "swift")
+        XCTAssertNil(f1.renameDescription)
+        XCTAssertTrue(f1.githubDiffAnchor.hasPrefix("diff-"))
+
+        let permalink = f1.githubPermalink(repoFullName: "owner/repo", prNumber: 42, lineNumber: 105)
+        XCTAssertNotNil(permalink)
+        XCTAssertTrue(permalink!.absoluteString.contains("github.com/owner/repo/pull/42/files#diff-"))
+        XCTAssertTrue(permalink!.absoluteString.hasSuffix("R105"))
+
+        let f2 = PullRequestFile(
+            id: "2", filename: "NewPath.swift", previousFilename: "OldPath.swift",
+            status: .renamed, additions: 0, deletions: 0, changes: 0, patch: nil
+        )
+        XCTAssertEqual(f2.directoryPath, "")
+        XCTAssertEqual(f2.baseFilename, "NewPath.swift")
+        XCTAssertEqual(f2.renameDescription, "OldPath.swift → NewPath.swift")
+    }
+
+    func test_ignore_whitespace_unified() {
+        let patch = """
+        @@ -1,2 +1,2 @@
+        -  let x = 1
+        +      let x = 1
+        """
+        let normal = DiffParser.parseUnified(patch: patch, ignoreWhitespace: false)
+        XCTAssertEqual(normal.filter { $0.kind == .deletion }.count, 1)
+        XCTAssertEqual(normal.filter { $0.kind == .addition }.count, 1)
+
+        let ignored = DiffParser.parseUnified(patch: patch, ignoreWhitespace: true)
+        // Indentation change is treated as context
+        XCTAssertEqual(ignored.filter { $0.kind == .deletion }.count, 0)
+        XCTAssertEqual(ignored.filter { $0.kind == .addition }.count, 0)
+        XCTAssertEqual(ignored.filter { $0.kind == .context }.count, 1)
+        XCTAssertEqual(ignored.filter { $0.kind == .context }.first?.text, "      let x = 1")
+    }
+
+    func test_ignore_whitespace_side_by_side() {
+        let patch = """
+        @@ -1,2 +1,2 @@
+        -  let count = 42
+        +      let count = 42
+        """
+        let normal = DiffParser.parseSideBySide(patch: patch, ignoreWhitespace: false)
+        let normalChangeRows = normal.filter { !$0.isHunkHeader }
+        XCTAssertEqual(normalChangeRows.count, 1)
+        XCTAssertEqual(normalChangeRows[0].left.kind, .deletion)
+        XCTAssertEqual(normalChangeRows[0].right.kind, .addition)
+
+        let ignored = DiffParser.parseSideBySide(patch: patch, ignoreWhitespace: true)
+        let ignoredChangeRows = ignored.filter { !$0.isHunkHeader }
+        XCTAssertEqual(ignoredChangeRows.count, 1)
+        XCTAssertEqual(ignoredChangeRows[0].left.kind, .context)
+        XCTAssertEqual(ignoredChangeRows[0].right.kind, .context)
+    }
 }

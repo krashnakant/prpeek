@@ -50,6 +50,8 @@ final class AppModel {
     /// Fired with a PR id when its review comments or commits finish loading, so
     /// the controller can repopulate just that submenu (no full menu rebuild).
     var onSubmenuReload: (@MainActor (String) -> Void)?
+    /// Fired with a PR key when its file diffs finish loading.
+    var onFilesLoaded: (@MainActor (String) -> Void)?
 
     // Views. `needsMe` drives the red badge, so muted PRs drop out of it.
     var needsMe: [PullRequest] { state.pullRequests.filter { $0.waitingOnMe && !isMuted($0) } }
@@ -424,6 +426,17 @@ final class AppModel {
     func isLoadingCommits(_ pr: PullRequest) -> Bool { session(for: pr)?.commitsCache.isLoading(pr) ?? false }
     func loadCommits(for pr: PullRequest) {
         session(for: pr)?.commitsCache.load(pr, epoch: self.epoch) { [weak self] id in self?.onSubmenuReload?(id) }
+    }
+
+    func files(for pr: PullRequest) -> [PullRequestFile]? { session(for: pr)?.filesCache.value(for: pr) }
+    func isLoadingFiles(_ pr: PullRequest) -> Bool { session(for: pr)?.filesCache.isLoading(pr) ?? false }
+    func loadFiles(for pr: PullRequest, onLoaded: (@MainActor ([PullRequestFile]) -> Void)? = nil) {
+        session(for: pr)?.filesCache.load(pr, epoch: self.epoch) { [weak self] id in
+            self?.onFilesLoaded?(id)
+            if let files = self?.files(for: pr) {
+                onLoaded?(files)
+            }
+        }
     }
 
     // MARK: - Write actions (the only calls that change anything on GitHub)

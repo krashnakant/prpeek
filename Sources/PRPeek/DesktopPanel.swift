@@ -19,8 +19,11 @@ final class DesktopPanel: NSObject {
     private var rowsHeight: NSLayoutConstraint!
     private static let maxRowsHeight: CGFloat = 270
 
-    init(model: AppModel) {
+    var onOpenDiff: ((PullRequest) -> Void)?
+
+    init(model: AppModel, onOpenDiff: ((PullRequest) -> Void)? = nil) {
         self.model = model
+        self.onOpenDiff = onOpenDiff
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged),
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -312,10 +315,13 @@ final class DesktopPanel: NSObject {
     private func prRow(_ pr: PullRequest) -> NSView {
         PRCardView(pr: pr, model: model, palette: model.palette,
                    freshness: model.freshness(pr),
-                   account: model.accountLabel(for: pr)) { [weak model] in
+                   account: model.accountLabel(for: pr),
+                   onOpen: { [weak model] in
             AppLog.desktopPanel.info("Desktop panel PR row opened")
             model?.open(pr)   // via the model so opening clears the "new" marker
-        }
+        }, onOpenDiff: { [weak self] in
+            self?.onOpenDiff?(pr)
+        })
     }
 
     /// Add a row that fills the panel width — a vertical NSStackView otherwise
@@ -435,13 +441,15 @@ private final class PRCardView: NSView {
     private let pr: PullRequest
     private weak var model: AppModel?
     private let onOpen: () -> Void
+    private let onOpenDiff: (() -> Void)?
     private var hovered = false
 
     init(pr: PullRequest, model: AppModel?, palette: Palette?, freshness: PRFreshness?,
-         account: String?, onOpen: @escaping () -> Void) {
+         account: String?, onOpen: @escaping () -> Void, onOpenDiff: (() -> Void)? = nil) {
         self.pr = pr
         self.model = model
         self.onOpen = onOpen
+        self.onOpenDiff = onOpenDiff
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 9
@@ -555,6 +563,13 @@ private final class PRCardView: NSView {
         open.image = menuIcon("arrow.up.right.square")
         menu.addItem(open)
 
+        if onOpenDiff != nil {
+            let viewDiff = NSMenuItem(title: "View Changes (Diff)…", action: #selector(contextViewDiff), keyEquivalent: "")
+            viewDiff.target = self
+            viewDiff.image = menuIcon("doc.text.magnifyingglass")
+            menu.addItem(viewDiff)
+        }
+
         let copyURL = NSMenuItem(title: "Copy URL", action: #selector(contextCopyURL), keyEquivalent: "")
         copyURL.target = self
         copyURL.image = menuIcon("doc.on.doc")
@@ -593,6 +608,9 @@ private final class PRCardView: NSView {
 
     @objc private func contextOpen() {
         onOpen()
+    }
+    @objc private func contextViewDiff() {
+        onOpenDiff?()
     }
     @objc private func contextCopyURL() {
         NSPasteboard.general.clearContents()

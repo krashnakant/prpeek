@@ -28,6 +28,7 @@ public final class AccountSession {
 
     public let commentsCache: PerPRLazyCache<[ReviewComment]>
     public let commitsCache: PerPRLazyCache<[Commit]>
+    public let filesCache: PerPRLazyCache<[PullRequestFile]>
 
     /// `tokenStore` and `transport` are injectable so tests can exercise the
     /// locked-Keychain and token-lifecycle paths without touching the real one.
@@ -54,6 +55,9 @@ public final class AccountSession {
         }
         self.commitsCache = PerPRLazyCache { o, r, n in
             try? await client.commits(owner: o, repo: r, number: n)
+        }
+        self.filesCache = PerPRLazyCache { o, r, n in
+            try? await client.pullRequestFiles(owner: o, repo: r, number: n)
         }
         self.status = (readOK && token == nil) ? .signedOut(reason: nil) : .loading
     }
@@ -97,7 +101,7 @@ public final class AccountSession {
         viewer = nil
         previousPRs = []
         firstPass = true
-        commentsCache.reset(); commitsCache.reset()
+        commentsCache.reset(); commitsCache.reset(); filesCache.reset()
         status = .signedOut(reason: nil)
         let client = self.client
         Task { await client.setToken(nil) }

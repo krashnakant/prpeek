@@ -10,6 +10,7 @@ final class StatusController: NSObject {
     private let model: AppModel
     private let panel: DesktopPanel
     private let search: SearchWindow
+    private let diffWindow: DiffWindow
     private let sectionCap = 15
     /// One truncation budget for every menu row that elides (commit subject,
     /// comment snippet, error text) — the untruncated text is in the tooltip.
@@ -26,8 +27,10 @@ final class StatusController: NSObject {
 
     init(model: AppModel) {
         self.model = model
-        self.panel = DesktopPanel(model: model)
-        self.search = SearchWindow(model: model)
+        let diff = DiffWindow(model: model)
+        self.diffWindow = diff
+        self.panel = DesktopPanel(model: model, onOpenDiff: { [weak diff] pr in diff?.show(for: pr) })
+        self.search = SearchWindow(model: model, onOpenDiff: { [weak diff] pr in diff?.show(for: pr) })
         super.init()
         GlobalHotkeyManager.shared.onSearch = { [weak self] in self?.search.toggle() }
         GlobalHotkeyManager.shared.onTogglePanel = { [weak self] in self?.panel.toggle() }
@@ -193,6 +196,11 @@ final class StatusController: NSObject {
         // commit, a review comment) just open.
         if let pr = sender.representedObject as? PullRequest { model.open(pr) }
         else if let url = sender.representedObject as? URL { NSWorkspace.shared.openSafeWebURL(url) }
+    }
+    @objc private func openDiff(_ sender: NSMenuItem) {
+        guard let pr = sender.representedObject as? PullRequest else { return }
+        AppLog.statusMenu.info("Open diff action selected")
+        diffWindow.show(for: pr)
     }
     @objc private func copyPRURL(_ sender: NSMenuItem) {
         AppLog.statusMenu.info("Copy PR URL action selected")
@@ -468,6 +476,12 @@ final class StatusController: NSObject {
         open.image = Self.menuIcon("arrow.up.right.square")
         open.representedObject = sub.pr
         sub.addItem(open)
+
+        let viewDiff = NSMenuItem(title: "View Changes (Diff)…", action: #selector(openDiff(_:)), keyEquivalent: "d")
+        viewDiff.target = self
+        viewDiff.image = Self.menuIcon("doc.text.magnifyingglass")
+        viewDiff.representedObject = sub.pr
+        sub.addItem(viewDiff)
 
         let copyURL = NSMenuItem(title: "Copy URL", action: #selector(copyPRURL(_:)), keyEquivalent: "")
         copyURL.target = self

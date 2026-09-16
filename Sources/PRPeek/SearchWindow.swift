@@ -38,7 +38,13 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     private var indexedPRs: [SearchItem] = []
     private var results: [PullRequest] = []
 
-    init(model: AppModel) { self.model = model; super.init() }
+    var onOpenDiff: ((PullRequest) -> Void)?
+
+    init(model: AppModel, onOpenDiff: ((PullRequest) -> Void)? = nil) {
+        self.model = model
+        self.onOpenDiff = onOpenDiff
+        super.init()
+    }
 
     var isVisible: Bool { window?.isVisible ?? false }
     func toggle() { isVisible ? hide() : show() }
@@ -107,6 +113,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         searchField.placeholderString = "Filter by repo, number, title, or author"
         searchField.delegate = self
         searchField.onScopeShortcut = { [weak self] index in self?.selectScope(index) }
+        searchField.onOpenDiff = { [weak self] in self?.openDiffSelected() }
 
         scopeControl.segmentCount = Scope.allCases.count
         for scope in Scope.allCases {
@@ -147,6 +154,7 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         table.onEscape = { [weak self] in self?.hide() }
         table.onCopy = { [weak self] in self?.copySelectedURL() }
         table.onScopeShortcut = { [weak self] index in self?.selectScope(index) }
+        table.onOpenDiff = { [weak self] in self?.openDiffSelected() }
         table.contextMenuProvider = { [weak self] in self?.makeContextMenu() }
 
         let scroll = NSScrollView()
@@ -336,6 +344,11 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         countLabel.stringValue = "Snoozed \(pr.repoFullName)#\(pr.number) until updated"
     }
 
+    @objc private func openDiffSelected() {
+        guard let pr = selectedPR else { return }
+        onOpenDiff?(pr)
+    }
+
     private func makeContextMenu() -> NSMenu? {
         guard let pr = selectedPR else { return nil }
         let menu = NSMenu()
@@ -343,6 +356,13 @@ final class SearchWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         open.target = self
         open.image = menuIcon("arrow.up.right.square")
         menu.addItem(open)
+
+        if onOpenDiff != nil {
+            let diff = NSMenuItem(title: "View Changes (Diff)…", action: #selector(openDiffSelected), keyEquivalent: "d")
+            diff.target = self
+            diff.image = menuIcon("doc.text.magnifyingglass")
+            menu.addItem(diff)
+        }
 
         let copyURL = NSMenuItem(title: "Copy URL", action: #selector(copySelectedURL), keyEquivalent: "")
         copyURL.target = self
@@ -530,9 +550,10 @@ private final class PRSearchCellView: NSTableCellView {
     }
 }
 
-/// NSSearchField that traps Cmd+1..4 so users can switch scopes without tabbing out of the search bar.
+/// NSSearchField that traps Cmd+1..4 and Cmd+D so users can switch scopes or view diffs without tabbing out.
 final class KeySearchField: NSSearchField {
     var onScopeShortcut: ((Int) -> Void)?
+    var onOpenDiff: (() -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.contains(.command), let chars = event.charactersIgnoringModifiers {
@@ -541,6 +562,7 @@ final class KeySearchField: NSSearchField {
             case "2": onScopeShortcut?(1); return true
             case "3": onScopeShortcut?(2); return true
             case "4": onScopeShortcut?(3); return true
+            case "d": onOpenDiff?(); return true
             default: break
             }
         }
@@ -548,12 +570,13 @@ final class KeySearchField: NSSearchField {
     }
 }
 
-/// NSTableView that reports Return/Escape/Copy/Cmd+1-4 so the window can open, dismiss, copy, or switch scopes.
+/// NSTableView that reports Return/Escape/Copy/Cmd+1-4/Cmd+D/Space so the window can open, dismiss, copy, switch scopes, or open diffs.
 final class KeyTableView: NSTableView {
     var onEnter: (() -> Void)?
     var onEscape: (() -> Void)?
     var onCopy: (() -> Void)?
     var onScopeShortcut: ((Int) -> Void)?
+    var onOpenDiff: (() -> Void)?
     var contextMenuProvider: (() -> NSMenu?)?
 
     override func keyDown(with event: NSEvent) {
@@ -561,6 +584,9 @@ final class KeyTableView: NSTableView {
             switch chars {
             case "c":
                 onCopy?()
+                return
+            case "d":
+                onOpenDiff?()
                 return
             case "1":
                 onScopeShortcut?(0); return
@@ -576,6 +602,7 @@ final class KeyTableView: NSTableView {
         }
         switch event.keyCode {
         case 36, 76: onEnter?()       // Return, keypad Enter
+        case 49:     onOpenDiff?()    // Spacebar: quick diff peek!
         case 53:     onEscape?()      // Escape
         default:     super.keyDown(with: event)
         }

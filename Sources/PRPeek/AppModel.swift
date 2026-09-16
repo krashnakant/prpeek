@@ -439,6 +439,13 @@ final class AppModel {
         }
     }
 
+    /// Fetch files for an individual commit in the PR.
+    func commitFiles(for pr: PullRequest, sha: String) async throws -> [PullRequestFile] {
+        guard let session = session(for: pr) else { return [] }
+        let (owner, repo) = pr.ownerRepo
+        return try await session.client.commitFiles(owner: owner, repo: repo, sha: sha)
+    }
+
     // MARK: - Write actions (the only calls that change anything on GitHub)
     // Each returns nil on success or a sentence to show the user. Failures do NOT
     // go through `status`: that badge reports the refresh loop's health, and a
@@ -476,6 +483,21 @@ final class AppModel {
             try await session.client.reply(owner: owner, repo: repo, number: pr.number, to: comment, body: body)
         }
         if failure == nil { session.commentsCache.reset() }
+        return failure
+    }
+
+    /// Submit a formal review verdict (approve, request changes, comment) on a PR.
+    func submitReview(_ pr: PullRequest, verdict: ReviewVerdictEvent, body: String?) async -> String? {
+        guard let session = session(for: pr) else { return "No account for this PR." }
+        let (owner, repo) = pr.ownerRepo
+        AppLog.appModel.info("Review verdict requested verdict=\(verdict.rawValue, privacy: .public)")
+        let failure = await perform {
+            try await session.client.submitReview(owner: owner, repo: repo, number: pr.number, event: verdict, body: body)
+        }
+        if failure == nil {
+            session.commentsCache.reset()
+            kickRefresh()
+        }
         return failure
     }
 

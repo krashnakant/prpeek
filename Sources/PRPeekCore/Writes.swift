@@ -10,6 +10,29 @@ public enum MergeMethod: String, Sendable, CaseIterable {
     case merge, squash, rebase
 }
 
+/// Review submission event kind.
+public enum ReviewVerdictEvent: String, Sendable, CaseIterable {
+    case approve = "APPROVE"
+    case requestChanges = "REQUEST_CHANGES"
+    case comment = "COMMENT"
+
+    public var title: String {
+        switch self {
+        case .approve: return "Approve"
+        case .requestChanges: return "Request Changes"
+        case .comment: return "Comment"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .approve: return "checkmark.circle.fill"
+        case .requestChanges: return "exclamationmark.circle.fill"
+        case .comment: return "bubble.left.fill"
+        }
+    }
+}
+
 public extension GitHubClient {
 
     /// PUT /repos/{o}/{r}/pulls/{n}/merge.
@@ -47,5 +70,35 @@ public extension GitHubClient {
             "/repos/\(owner)/\(repo)/pulls/\(number)/comments/\($0)/replies"
         } ?? "/repos/\(owner)/\(repo)/issues/\(number)/comments"
         try await rawWrite(method: "POST", path: path, body: ["body": body])
+    }
+
+    /// POST /repos/{o}/{r}/pulls/{n}/reviews
+    /// Submits a formal pull request review verdict (APPROVE, REQUEST_CHANGES, or COMMENT).
+    func submitReview(owner: String, repo: String, number: Int,
+                      event: ReviewVerdictEvent, body: String? = nil) async throws {
+        var payload: [String: any Sendable] = ["event": event.rawValue]
+        if let body = body?.trimmingCharacters(in: .whitespacesAndNewlines), !body.isEmpty {
+            payload["body"] = body
+        }
+        try await rawWrite(method: "POST",
+                           path: "/repos/\(owner)/\(repo)/pulls/\(number)/reviews",
+                           body: payload)
+    }
+
+    /// POST /repos/{o}/{r}/pulls/{n}/comments
+    /// Creates a new inline code comment on a specific line of the PR diff.
+    func createReviewComment(owner: String, repo: String, number: Int,
+                             commitSHA: String, path: String, line: Int,
+                             side: String = "RIGHT", body: String) async throws {
+        let payload: [String: any Sendable] = [
+            "body": body,
+            "commit_id": commitSHA,
+            "path": path,
+            "line": line,
+            "side": side
+        ]
+        try await rawWrite(method: "POST",
+                           path: "/repos/\(owner)/\(repo)/pulls/\(number)/comments",
+                           body: payload)
     }
 }

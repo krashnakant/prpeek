@@ -116,4 +116,34 @@ final class WritesTests: XCTestCase {
         XCTAssertEqual(comment(id: "c4242").inlineCommentID, 4242)
         XCTAssertNil(comment(id: "r77").inlineCommentID, "a review can't be replied to in-thread")
     }
+
+    func test_submitReview_posts_event_and_body() async throws {
+        URLProtocolStub.handler = { req in
+            XCTAssertEqual(req.httpMethod, "POST")
+            XCTAssertEqual(req.url?.path, "/repos/o/r/pulls/12/reviews")
+            let body = jsonBody(req)
+            XCTAssertEqual(body["event"] as? String, "APPROVE")
+            XCTAssertEqual(body["body"] as? String, "LGTM!")
+            return (httpResponse(url: req.url!, status: 200), Data("{}".utf8))
+        }
+        try await makeClient().submitReview(owner: "o", repo: "r", number: 12, event: .approve, body: "LGTM!")
+    }
+
+    func test_createReviewComment_posts_payload() async throws {
+        URLProtocolStub.handler = { req in
+            XCTAssertEqual(req.httpMethod, "POST")
+            XCTAssertEqual(req.url?.path, "/repos/o/r/pulls/15/comments")
+            let body = jsonBody(req)
+            XCTAssertEqual(body["commit_id"] as? String, "sha123")
+            XCTAssertEqual(body["path"] as? String, "App.swift")
+            XCTAssertEqual(body["line"] as? Int, 42)
+            XCTAssertEqual(body["side"] as? String, "RIGHT")
+            XCTAssertEqual(body["body"] as? String, "Nit: rename this")
+            return (httpResponse(url: req.url!, status: 201), Data("{}".utf8))
+        }
+        try await makeClient().createReviewComment(
+            owner: "o", repo: "r", number: 15, commitSHA: "sha123",
+            path: "App.swift", line: 42, side: "RIGHT", body: "Nit: rename this"
+        )
+    }
 }

@@ -44,4 +44,32 @@ final class CommitsTests: XCTestCase {
         XCTAssertEqual(commits[0].ciState, .failing)
         XCTAssertEqual(commits[1].ciState, .passing)
     }
+
+    func test_commitFiles_maps_files() async throws {
+        URLProtocolStub.handler = { req in
+            XCTAssertEqual(req.url?.path, "/repos/acme/web/commits/c3ccccc0")
+            let body = """
+            {
+              "sha": "c3ccccc0",
+              "files": [
+                {
+                  "sha": "f111",
+                  "filename": "Sources/Foo.swift",
+                  "status": "modified",
+                  "additions": 5,
+                  "deletions": 1,
+                  "changes": 6,
+                  "patch": "@@ -1 +1 @@\\n-old\\n+new"
+                }
+              ]
+            }
+            """
+            return (httpResponse(url: req.url!, status: 200), body.data(using: .utf8)!)
+        }
+        let client = GitHubClient(transport: URLSessionTransport(session: URLProtocolStub.session()), token: "t")
+        let files = try await client.commitFiles(owner: "acme", repo: "web", sha: "c3ccccc0")
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files[0].filename, "Sources/Foo.swift")
+        XCTAssertEqual(files[0].additions, 5)
+    }
 }

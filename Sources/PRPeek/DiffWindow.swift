@@ -2,14 +2,24 @@ import AppKit
 import PRPeekCore
 
 /// Dedicated, high-performance native Diff Viewer window for PRPeek.
-/// Supports Side-by-Side and Inline views, intra-line word delta highlighting,
-/// inline review comments overlay, hunk-to-hunk navigation (J/K), file viewed checkmarks (V),
-/// in-diff search (⌘F), whitespace ignore toggle (W), breadcrumbs, syntax tinting, and GitHub permalinks (⌥C).
+/// Supports Side-by-Side & Inline views, intra-line word deltas, inline review comments with quick replies,
+/// hunk navigation (J/K), file viewed tracking (V), in-diff search (⌘F), whitespace ignore (W),
+/// folder tree vs flat list sidebar, commit-by-commit review, local IDE jump (⌘E), and review submission (⌘⇧R).
 @MainActor
 final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     enum ViewMode: Int {
         case sideBySide = 0
         case inline = 1
+    }
+
+    enum SidebarViewMode: Int {
+        case flat = 0
+        case tree = 1
+    }
+
+    enum SidebarItem {
+        case folder(path: String, name: String, fileCount: Int, isExpanded: Bool, depth: Int)
+        case file(PullRequestFile, depth: Int)
     }
 
     enum DiffTableRow {
@@ -58,6 +68,21 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         }
     }
 
+    // Sidebar Tree / Flat State
+    private var sidebarViewMode: SidebarViewMode {
+        get {
+            let val = UserDefaults.standard.integer(forKey: "diffSidebarMode")
+            return SidebarViewMode(rawValue: val) ?? .flat
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "diffSidebarMode")
+            sidebarModeControl.selectedSegment = newValue.rawValue
+            rebuildSidebarItems()
+        }
+    }
+    private var expandedFolders: Set<String> = []
+    private var sidebarItems: [SidebarItem] = []
+
     // In-Diff Search State
     private let searchBar = DiffSearchBarView()
     private var searchBarHeightConstraint: NSLayoutConstraint?
@@ -65,9 +90,16 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     private var searchMatchRowIndices: [Int] = []
     private var currentSearchMatchIndex: Int = 0
 
+    // Inline Reply State
+    private var activeReplyCommentIDs: Set<String> = []
+
+    // Commit Picker State
+    private var currentCommitSHA: String?
+
     // UI Elements
     private let splitView = NSSplitView()
     private let fileFilterField = NSSearchField()
+    private let sidebarModeControl = NSSegmentedControl()
     private let fileTable = KeyTableView()
     private let diffTable = KeyTableView()
 
@@ -76,6 +108,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     private let statsBadge = makePill()
     private let viewedBadge = makePill()
     private let hunkBadge = makePill()
+    private let commitPopUp = NSPopUpButton()
+    private let submitReviewBtn = NSButton()
     private let whitespaceBtn = NSButton()
     private let modeControl = NSSegmentedControl()
 
@@ -145,6 +179,28 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         repoBadge.view.layer?.backgroundColor = accent.withAlphaComponent(0.14).cgColor
         updateViewedProgress()
         updateWhitespaceBtn()
+        updateCommitPicker()
+    }
+
+    private func updateCommitPicker() {
+        guard let pr = currentPR else { return }
+        commitPopUp.removeAllItems()
+        commitPopUp.addItem(withTitle: "All Changes")
+        commitPopUp.item(at: 0)?.representedObject = nil
+
+        if let commits = model.commits(for: pr) {
+            for c in commits {
+                let title = "\(c.shortSHA): \(c.message)"
+                commitPopUp.addItem(withTitle: title)
+                commitPopUp.lastItem?.representedObject = c.id
+            }
+        }
+        if let currentSHA = currentCommitSHA,
+           let idx = commitPopUp.itemArray.firstIndex(where: { ($0.representedObject as? String) == currentSHA }) {
+            commitPopUp.selectItem(at: idx)
+        } else {
+            commitPopUp.selectItem(at: 0)
+        }
     }
 
     private func updateWhitespaceBtn() {
@@ -180,6 +236,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     private func loadDiff(for pr: PullRequest) {
         allFiles = []
         filteredFiles = []
+        sidebarItems = []
         selectedFileIndex = 0
         fileTable.reloadData()
         tableRows = []
@@ -190,8 +247,9 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         progressIndicator.startAnimation(nil)
         progressIndicator.isHidden = false
 
-        // Load comments asynchronously in background to overlay on diff
+        // Load comments and commits asynchronously in background
         model.loadComments(for: pr)
+        model.loadCommits(for: pr)
 
         if let cached = model.files(for: pr) {
             populateFiles(cached)
@@ -218,6 +276,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         statsBadge.view.layer?.backgroundColor = (model.palette?.green ?? .systemGreen).withAlphaComponent(0.12).cgColor
 
         updateViewedProgress()
+        updateCommitPicker()
 
         if files.isEmpty {
             emptyStateLabel.stringValue = "No files changed in this PR."
@@ -235,7 +294,18 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         } else {
             filteredFiles = allFiles.filter { $0.filename.lowercased().contains(q) }
         }
-        fileTable.reloadData()
+
+        // Expand all folders by default when search query or files change
+        if expandedFolders.isEmpty {
+            for f in filteredFiles {
+                if !f.directoryPath.isEmpty {
+                    expandedFolders.insert(f.directoryPath)
+                }
+            }
+        }
+
+        rebuildSidebarItems()
+
         if !filteredFiles.isEmpty {
             selectFile(at: min(selectedFileIndex, filteredFiles.count - 1))
         } else {
@@ -249,11 +319,59 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         }
     }
 
+    private func rebuildSidebarItems() {
+        sidebarItems = []
+        if sidebarViewMode == .flat {
+            for file in filteredFiles {
+                sidebarItems.append(.file(file, depth: 0))
+            }
+        } else {
+            var folderFileMap: [String: [PullRequestFile]] = [:]
+            var rootFiles: [PullRequestFile] = []
+
+            for file in filteredFiles {
+                let dir = file.directoryPath
+                if dir.isEmpty {
+                    rootFiles.append(file)
+                } else {
+                    folderFileMap[dir, default: []].append(file)
+                }
+            }
+
+            let sortedFolders = folderFileMap.keys.sorted()
+            for folder in sortedFolders {
+                let isExpanded = expandedFolders.contains(folder)
+                let name = folder.hasSuffix("/") ? String(folder.dropLast()) : folder
+                let folderName = (name as NSString).lastPathComponent
+                let files = folderFileMap[folder] ?? []
+                sidebarItems.append(.folder(path: folder, name: folderName, fileCount: files.count, isExpanded: isExpanded, depth: 0))
+
+                if isExpanded {
+                    for file in files {
+                        sidebarItems.append(.file(file, depth: 1))
+                    }
+                }
+            }
+
+            for file in rootFiles {
+                sidebarItems.append(.file(file, depth: 0))
+            }
+        }
+        fileTable.reloadData()
+    }
+
     private func selectFile(at index: Int) {
         guard filteredFiles.indices.contains(index) else { return }
         selectedFileIndex = index
-        fileTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        fileTable.scrollRowToVisible(index)
+
+        // Sync selection in fileTable
+        if let row = sidebarItems.firstIndex(where: {
+            if case .file(let f, _) = $0 { return f.filename == filteredFiles[index].filename }
+            return false
+        }) {
+            fileTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            fileTable.scrollRowToVisible(row)
+        }
 
         let file = filteredFiles[index]
 
@@ -410,14 +528,13 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             viewedFilePaths.remove(file.filename)
         } else {
             viewedFilePaths.insert(file.filename)
-            // Advance to next unviewed file
             if let nextIdx = filteredFiles.indices.first(where: { $0 > selectedFileIndex && !viewedFilePaths.contains(filteredFiles[$0].filename) })
                 ?? filteredFiles.indices.first(where: { !viewedFilePaths.contains(filteredFiles[$0].filename) }) {
                 selectFile(at: nextIdx)
             }
         }
         saveViewed()
-        fileTable.reloadData()
+        rebuildSidebarItems()
         updateViewedProgress()
     }
 
@@ -507,12 +624,12 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     // MARK: - Window Construction
 
     private func makeWindow() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 740),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.setFrameAutosaveName("PRPeekDiffWindow")
-        w.minSize = NSSize(width: 800, height: 500)
+        w.minSize = NSSize(width: 840, height: 520)
         w.center()
         w.delegate = self
         w.appearance = model.theme.nsAppearance
@@ -540,7 +657,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         splitView.addSubview(rightPane)
 
         // Adjust split position
-        splitView.setPosition(280, ofDividerAt: 0)
+        splitView.setPosition(290, ofDividerAt: 0)
 
         NSLayoutConstraint.activate([
             headerView.topAnchor.constraint(equalTo: content.topAnchor),
@@ -565,6 +682,20 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        commitPopUp.bezelStyle = .rounded
+        commitPopUp.font = .systemFont(ofSize: 11, weight: .medium)
+        commitPopUp.target = self
+        commitPopUp.action = #selector(commitPickerChanged(_:))
+        commitPopUp.translatesAutoresizingMaskIntoConstraints = false
+
+        submitReviewBtn.title = "Submit Review…"
+        submitReviewBtn.bezelStyle = .rounded
+        submitReviewBtn.font = .systemFont(ofSize: 11, weight: .semibold)
+        submitReviewBtn.target = self
+        submitReviewBtn.action = #selector(showSubmitReviewSheet)
+        submitReviewBtn.toolTip = "Submit Pull Request Review (⌘⇧R)"
+        submitReviewBtn.translatesAutoresizingMaskIntoConstraints = false
 
         whitespaceBtn.setButtonType(.pushOnPushOff)
         whitespaceBtn.bezelStyle = .inline
@@ -592,10 +723,12 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
         bar.addSubview(repoBadge.view)
         bar.addSubview(titleLabel)
+        bar.addSubview(commitPopUp)
         bar.addSubview(statsBadge.view)
         bar.addSubview(viewedBadge.view)
         bar.addSubview(hunkBadge.view)
         bar.addSubview(whitespaceBtn)
+        bar.addSubview(submitReviewBtn)
         bar.addSubview(modeControl)
         bar.addSubview(openBrowserBtn)
 
@@ -610,7 +743,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
             titleLabel.leadingAnchor.constraint(equalTo: repoBadge.view.trailingAnchor, constant: 8),
             titleLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: statsBadge.view.leadingAnchor, constant: -10),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: commitPopUp.leadingAnchor, constant: -10),
+
+            commitPopUp.trailingAnchor.constraint(equalTo: statsBadge.view.leadingAnchor, constant: -8),
+            commitPopUp.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            commitPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
 
             statsBadge.view.trailingAnchor.constraint(equalTo: viewedBadge.view.leadingAnchor, constant: -8),
             statsBadge.view.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
@@ -621,8 +758,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             hunkBadge.view.trailingAnchor.constraint(equalTo: whitespaceBtn.leadingAnchor, constant: -10),
             hunkBadge.view.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
 
-            whitespaceBtn.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -10),
+            whitespaceBtn.trailingAnchor.constraint(equalTo: submitReviewBtn.leadingAnchor, constant: -10),
             whitespaceBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+
+            submitReviewBtn.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -10),
+            submitReviewBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
 
             modeControl.trailingAnchor.constraint(equalTo: openBrowserBtn.leadingAnchor, constant: -10),
             modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
@@ -650,6 +790,16 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         fileFilterField.action = #selector(filterFilesChanged)
         fileFilterField.translatesAutoresizingMaskIntoConstraints = false
 
+        sidebarModeControl.segmentCount = 2
+        sidebarModeControl.setLabel("☰", forSegment: 0)
+        sidebarModeControl.setToolTip("Flat List", forSegment: 0)
+        sidebarModeControl.setLabel("☵", forSegment: 1)
+        sidebarModeControl.setToolTip("Folder Tree", forSegment: 1)
+        sidebarModeControl.selectedSegment = sidebarViewMode.rawValue
+        sidebarModeControl.target = self
+        sidebarModeControl.action = #selector(sidebarModeChanged(_:))
+        sidebarModeControl.translatesAutoresizingMaskIntoConstraints = false
+
         fileTable.headerView = nil
         fileTable.rowHeight = 34
         fileTable.style = .plain
@@ -672,12 +822,17 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         scroll.autohidesScrollers = true
 
         pane.addSubview(fileFilterField)
+        pane.addSubview(sidebarModeControl)
         pane.addSubview(scroll)
 
         NSLayoutConstraint.activate([
             fileFilterField.topAnchor.constraint(equalTo: pane.topAnchor, constant: 8),
             fileFilterField.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8),
-            fileFilterField.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
+            fileFilterField.trailingAnchor.constraint(equalTo: sidebarModeControl.leadingAnchor, constant: -6),
+
+            sidebarModeControl.centerYAnchor.constraint(equalTo: fileFilterField.centerYAnchor),
+            sidebarModeControl.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
+            sidebarModeControl.widthAnchor.constraint(equalToConstant: 60),
 
             scroll.topAnchor.constraint(equalTo: fileFilterField.bottomAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
@@ -702,6 +857,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         currentFilePathLabel.isSelectable = true
         currentFilePathLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        let ideBtn = NSButton(image: Self.symbol("arrow.up.forward.app"), target: self, action: #selector(openInIDEClicked))
+        ideBtn.isBordered = false
+        ideBtn.toolTip = "Open in Local IDE (⌘E)"
+        ideBtn.translatesAutoresizingMaskIntoConstraints = false
+
         let findBtn = NSButton(image: Self.symbol("magnifyingglass"), target: self, action: #selector(toggleFindClicked))
         findBtn.isBordered = false
         findBtn.toolTip = "Find in Diff (⌘F)"
@@ -719,6 +879,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
         fileBar.addSubview(currentFileStatusBadge.view)
         fileBar.addSubview(currentFilePathLabel)
+        fileBar.addSubview(ideBtn)
         fileBar.addSubview(findBtn)
         fileBar.addSubview(toggleViewedBtn)
         fileBar.addSubview(copyPathBtn)
@@ -729,7 +890,12 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
             currentFilePathLabel.leadingAnchor.constraint(equalTo: currentFileStatusBadge.view.trailingAnchor, constant: 8),
             currentFilePathLabel.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
-            currentFilePathLabel.trailingAnchor.constraint(lessThanOrEqualTo: findBtn.leadingAnchor, constant: -8),
+            currentFilePathLabel.trailingAnchor.constraint(lessThanOrEqualTo: ideBtn.leadingAnchor, constant: -8),
+
+            ideBtn.trailingAnchor.constraint(equalTo: findBtn.leadingAnchor, constant: -8),
+            ideBtn.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
+            ideBtn.widthAnchor.constraint(equalToConstant: 20),
+            ideBtn.heightAnchor.constraint(equalToConstant: 20),
 
             findBtn.trailingAnchor.constraint(equalTo: toggleViewedBtn.leadingAnchor, constant: -8),
             findBtn.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
@@ -827,6 +993,39 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         }
     }
 
+    @objc private func sidebarModeChanged(_ sender: NSSegmentedControl) {
+        if let mode = SidebarViewMode(rawValue: sender.selectedSegment) {
+            sidebarViewMode = mode
+        }
+    }
+
+    @objc private func commitPickerChanged(_ sender: NSPopUpButton) {
+        if sender.indexOfSelectedItem == 0 {
+            currentCommitSHA = nil
+            populateFiles(allFiles)
+        } else if let sha = sender.selectedItem?.representedObject as? String, let pr = currentPR {
+            currentCommitSHA = sha
+            emptyStateLabel.stringValue = "Loading commit diff…"
+            emptyStateLabel.isHidden = false
+            progressIndicator.startAnimation(nil)
+            progressIndicator.isHidden = false
+
+            Task { @MainActor in
+                do {
+                    let commitFiles = try await model.commitFiles(for: pr, sha: sha)
+                    progressIndicator.stopAnimation(nil)
+                    progressIndicator.isHidden = true
+                    populateFiles(commitFiles)
+                } catch {
+                    progressIndicator.stopAnimation(nil)
+                    progressIndicator.isHidden = true
+                    emptyStateLabel.stringValue = "Failed to load commit: \(error.localizedDescription)"
+                    emptyStateLabel.isHidden = false
+                }
+            }
+        }
+    }
+
     @objc private func openOnGitHub() {
         guard let pr = currentPR else { return }
         model.open(pr)
@@ -844,6 +1043,24 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         toggleIgnoreWhitespace()
     }
 
+    @objc private func openInIDEClicked() {
+        openCurrentFileInLocalIDE()
+    }
+
+    @objc private func showSubmitReviewSheet() {
+        guard let pr = currentPR, let window else { return }
+        let sheet = ReviewSubmissionSheet(pr: pr, palette: model.palette)
+        sheet.onSubmit = { [weak self] verdict, body in
+            guard let self else { return "Window closed." }
+            let error = await self.model.submitReview(pr, verdict: verdict, body: body)
+            if error == nil {
+                self.loadDiff(for: pr)
+            }
+            return error
+        }
+        window.beginSheet(sheet.window!) { _ in }
+    }
+
     @objc private func copyCurrentPath() {
         guard filteredFiles.indices.contains(selectedFileIndex) else { return }
         let path = filteredFiles[selectedFileIndex].filename
@@ -856,7 +1073,90 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     }
 
     @objc private func fileSelected() {
-        selectFile(at: fileTable.selectedRow)
+        let selRow = fileTable.selectedRow
+        guard sidebarItems.indices.contains(selRow) else { return }
+        switch sidebarItems[selRow] {
+        case .folder(let path, _, _, let isExpanded, _):
+            if isExpanded {
+                expandedFolders.remove(path)
+            } else {
+                expandedFolders.insert(path)
+            }
+            rebuildSidebarItems()
+        case .file(let file, _):
+            if let idx = filteredFiles.firstIndex(where: { $0.filename == file.filename }) {
+                selectFile(at: idx)
+            }
+        }
+    }
+
+    // MARK: - Local IDE Jump & Git Helpers
+
+    private func currentSelectedLineNumber() -> Int? {
+        let selRow = diffTable.selectedRow
+        guard selRow >= 0 && selRow < tableRows.count else { return 1 }
+        switch tableRows[selRow] {
+        case .unified(let line): return line.newLineNumber ?? line.oldLineNumber ?? 1
+        case .sideBySide(let sbs): return sbs.right.lineNumber ?? sbs.left.lineNumber ?? 1
+        case .reviewComment(let c): return c.fileAndLine?.line ?? 1
+        }
+    }
+
+    private func findLocalRepoPath(for pr: PullRequest) -> String? {
+        let repoName = pr.repoName
+        let repoFull = pr.repoFullName
+
+        if let saved = UserDefaults.standard.string(forKey: "localRepo_\(repoFull)"),
+           FileManager.default.fileExists(atPath: saved) {
+            return saved
+        }
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = [
+            FileManager.default.currentDirectoryPath,
+            "\(home)/experiments/\(repoName)",
+            "\(home)/Developer/\(repoName)",
+            "\(home)/Projects/\(repoName)",
+            "\(home)/workspace/\(repoName)",
+            "\(home)/src/\(repoName)",
+            "\(home)/code/\(repoName)",
+            "\(home)/\(repoName)"
+        ]
+
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: "\(path)/.git") || FileManager.default.fileExists(atPath: path) {
+                if (path as NSString).lastPathComponent.lowercased() == repoName.lowercased() {
+                    UserDefaults.standard.set(path, forKey: "localRepo_\(repoFull)")
+                    return path
+                }
+            }
+        }
+        return nil
+    }
+
+    private func openCurrentFileInLocalIDE() {
+        guard filteredFiles.indices.contains(selectedFileIndex), let pr = currentPR else { return }
+        let file = filteredFiles[selectedFileIndex]
+        let line = currentSelectedLineNumber()
+
+        guard let repoPath = findLocalRepoPath(for: pr) else {
+            let panel = NSOpenPanel()
+            panel.title = "Locate Local Repository for \(pr.repoFullName)"
+            panel.prompt = "Select Folder"
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.canCreateDirectories = false
+            panel.allowsMultipleSelection = false
+            if panel.runModal() == .OK, let url = panel.url {
+                UserDefaults.standard.set(url.path, forKey: "localRepo_\(pr.repoFullName)")
+                let fullPath = "\(url.path)/\(file.filename)"
+                ExternalEditor.open(filePath: fullPath, line: line)
+            }
+            return
+        }
+
+        let fullPath = "\(repoPath)/\(file.filename)"
+        ExternalEditor.open(filePath: fullPath, line: line)
     }
 
     // MARK: - Context Menus
@@ -899,14 +1199,22 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             menu.addItem(openItem)
         }
 
-        // 2. Copy Relative File Path
+        // 2. Open in Local IDE
+        let ideItem = NSMenuItem(title: "Open in Local IDE (\(ExternalEditor.preferred.rawValue))", action: #selector(openInIDEClicked), keyEquivalent: "e")
+        ideItem.target = self
+        ideItem.image = Self.symbol("arrow.up.forward.app")
+        menu.addItem(ideItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 3. Copy Relative File Path
         let pathItem = NSMenuItem(title: "Copy File Path", action: #selector(copyTextItemAction(_:)), keyEquivalent: "")
         pathItem.target = self
         pathItem.representedObject = file.filename
         pathItem.image = Self.symbol("doc.on.doc")
         menu.addItem(pathItem)
 
-        // 3. Copy Line Content
+        // 4. Copy Line Content
         if !lineText.isEmpty {
             let textItem = NSMenuItem(title: "Copy Line Content", action: #selector(copyTextItemAction(_:)), keyEquivalent: "")
             textItem.target = self
@@ -920,8 +1228,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
     private func makeFileContextMenu() -> NSMenu? {
         let selRow = fileTable.selectedRow
-        guard filteredFiles.indices.contains(selRow) else { return nil }
-        let file = filteredFiles[selRow]
+        guard sidebarItems.indices.contains(selRow) else { return nil }
+        guard case .file(let file, _) = sidebarItems[selRow] else { return nil }
         let menu = NSMenu()
 
         let pathItem = NSMenuItem(title: "Copy File Path", action: #selector(copyTextItemAction(_:)), keyEquivalent: "")
@@ -938,6 +1246,19 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             menu.addItem(urlItem)
         }
 
+        let ideItem = NSMenuItem(title: "Open in Local IDE", action: #selector(openInIDEClicked), keyEquivalent: "")
+        ideItem.target = self
+        ideItem.image = Self.symbol("arrow.up.forward.app")
+        menu.addItem(ideItem)
+
+        if let pr = currentPR {
+            let checkoutItem = NSMenuItem(title: "Copy Git Checkout Command", action: #selector(copyCheckoutCommand), keyEquivalent: "")
+            checkoutItem.target = self
+            checkoutItem.representedObject = "git fetch origin pull/\(pr.number)/head:pr-\(pr.number) && git checkout pr-\(pr.number)"
+            checkoutItem.image = Self.symbol("terminal")
+            menu.addItem(checkoutItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         let isViewed = viewedFilePaths.contains(file.filename)
@@ -947,6 +1268,12 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         menu.addItem(toggleItem)
 
         return menu
+    }
+
+    @objc private func copyCheckoutCommand(_ sender: NSMenuItem) {
+        guard let str = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(str, forType: .string)
     }
 
     @objc private func copyURLItemAction(_ sender: NSMenuItem) {
@@ -968,22 +1295,16 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
     @objc private func toggleSelectedFileViewed() {
         let selRow = fileTable.selectedRow
-        guard filteredFiles.indices.contains(selRow) else { return }
-        toggleViewed(for: filteredFiles[selRow])
+        guard sidebarItems.indices.contains(selRow) else { return }
+        if case .file(let file, _) = sidebarItems[selRow] {
+            toggleViewed(for: file)
+        }
     }
 
     private func copyPermalinkForSelectedOrCurrent() {
         guard filteredFiles.indices.contains(selectedFileIndex), let pr = currentPR else { return }
         let file = filteredFiles[selectedFileIndex]
-        var lineNum: Int? = nil
-        let selRow = diffTable.selectedRow
-        if selRow >= 0 && selRow < tableRows.count {
-            switch tableRows[selRow] {
-            case .unified(let line): lineNum = line.newLineNumber ?? line.oldLineNumber
-            case .sideBySide(let sbs): lineNum = sbs.right.lineNumber ?? sbs.left.lineNumber
-            case .reviewComment(let c): lineNum = c.fileAndLine?.line
-            }
-        }
+        let lineNum = currentSelectedLineNumber()
         if let permalink = file.githubPermalink(repoFullName: pr.repoFullName, prNumber: pr.number, lineNumber: lineNum) {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(permalink.absoluteString, forType: .string)
@@ -999,7 +1320,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
             let isTyping = (self.window?.firstResponder as? NSTextView) != nil
 
-            if event.modifierFlags.contains(.command) {
+            if event.modifierFlags.contains([.command, .shift]) {
+                if event.charactersIgnoringModifiers == "r" || event.charactersIgnoringModifiers == "R" {
+                    self.showSubmitReviewSheet(); return nil
+                }
+            } else if event.modifierFlags.contains(.command) {
                 if event.charactersIgnoringModifiers == "1" {
                     self.viewMode = .sideBySide; return nil
                 } else if event.charactersIgnoringModifiers == "2" {
@@ -1010,6 +1335,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
                     self.openOnGitHub(); return nil
                 } else if event.charactersIgnoringModifiers == "f" {
                     self.toggleSearchBar(); return nil
+                } else if event.charactersIgnoringModifiers == "e" {
+                    self.openCurrentFileInLocalIDE(); return nil
                 }
             } else if event.modifierFlags.contains(.option) {
                 if event.keyCode == 125 { // Option+Down
@@ -1058,7 +1385,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
     func numberOfRows(in tableView: NSTableView) -> Int {
         if tableView === fileTable {
-            return filteredFiles.count
+            return sidebarItems.count
         } else {
             return tableRows.count
         }
@@ -1066,7 +1393,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         if tableView === fileTable {
-            return 34
+            guard sidebarItems.indices.contains(row) else { return 34 }
+            switch sidebarItems[row] {
+            case .folder: return 28
+            case .file: return 34
+            }
         }
         guard tableRows.indices.contains(row) else { return 20 }
         switch tableRows[row] {
@@ -1074,22 +1405,34 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             return 20
         case .reviewComment(let comment):
             let lines = max(1, comment.body.components(separatedBy: "\n").count)
-            return min(CGFloat(40 + lines * 16), 140)
+            var h = CGFloat(42 + lines * 16)
+            if activeReplyCommentIDs.contains(comment.id) {
+                h += 68
+            }
+            return min(h, 240)
         }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         if tableView === fileTable {
-            guard filteredFiles.indices.contains(row) else { return nil }
-            let file = filteredFiles[row]
-            let isViewed = viewedFilePaths.contains(file.filename)
-            let cell = (tableView.makeView(withIdentifier: .init("fileCell"), owner: self) as? DiffFileCellView)
-                ?? DiffFileCellView(frame: .zero)
-            cell.identifier = .init("fileCell")
-            cell.configure(file: file, isViewed: isViewed, palette: model.palette) { [weak self] in
-                self?.toggleViewed(for: file)
+            guard sidebarItems.indices.contains(row) else { return nil }
+            switch sidebarItems[row] {
+            case .folder(_, let name, let count, let isExpanded, let depth):
+                let cell = (tableView.makeView(withIdentifier: .init("folderCell"), owner: self) as? DiffFolderCellView)
+                    ?? DiffFolderCellView(frame: .zero)
+                cell.identifier = .init("folderCell")
+                cell.configure(name: name, fileCount: count, isExpanded: isExpanded, depth: depth, palette: model.palette)
+                return cell
+            case .file(let file, let depth):
+                let isViewed = viewedFilePaths.contains(file.filename)
+                let cell = (tableView.makeView(withIdentifier: .init("fileCell"), owner: self) as? DiffFileCellView)
+                    ?? DiffFileCellView(frame: .zero)
+                cell.identifier = .init("fileCell")
+                cell.configure(file: file, isViewed: isViewed, depth: depth, palette: model.palette) { [weak self] in
+                    self?.toggleViewed(for: file)
+                }
+                return cell
             }
-            return cell
         } else {
             guard tableRows.indices.contains(row) else { return nil }
             switch tableRows[row] {
@@ -1109,7 +1452,26 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
                 let cell = (tableView.makeView(withIdentifier: .init("commentCell"), owner: self) as? DiffCommentCellView)
                     ?? DiffCommentCellView(frame: .zero)
                 cell.identifier = .init("commentCell")
-                cell.configure(comment: comment, searchQuery: currentSearchQuery, palette: model.palette)
+                let isReplying = activeReplyCommentIDs.contains(comment.id)
+                cell.configure(comment: comment, isReplying: isReplying, searchQuery: currentSearchQuery, palette: model.palette,
+                               onToggleReply: { [weak self] active in
+                    guard let self else { return }
+                    if active {
+                        self.activeReplyCommentIDs.insert(comment.id)
+                    } else {
+                        self.activeReplyCommentIDs.remove(comment.id)
+                    }
+                    self.diffTable.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+                }, onSendReply: { [weak self] replyText in
+                    guard let self, let pr = self.currentPR else { return }
+                    Task { @MainActor in
+                        let err = await self.model.reply(to: comment, on: pr, body: replyText)
+                        if err == nil {
+                            self.activeReplyCommentIDs.remove(comment.id)
+                            self.loadDiff(for: pr)
+                        }
+                    }
+                })
                 return cell
             }
         }
@@ -1122,7 +1484,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             viewedFilePaths.insert(file.filename)
         }
         saveViewed()
-        fileTable.reloadData()
+        rebuildSidebarItems()
         updateViewedProgress()
     }
 
@@ -1235,6 +1597,234 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) ?? NSImage()
         img.isTemplate = true
         return img
+    }
+}
+
+// MARK: - External Editor Helper
+
+enum ExternalEditor: String, CaseIterable {
+    case vscode = "Visual Studio Code"
+    case cursor = "Cursor"
+    case xcode = "Xcode"
+    case sublime = "Sublime Text"
+
+    var bundleID: String {
+        switch self {
+        case .vscode: return "com.microsoft.VSCode"
+        case .cursor: return "com.todesktop.230313mzl4w4u92"
+        case .xcode: return "com.apple.dt.Xcode"
+        case .sublime: return "com.sublimetext.4"
+        }
+    }
+
+    var isInstalled: Bool {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
+    }
+
+    static var preferred: ExternalEditor {
+        if let saved = UserDefaults.standard.string(forKey: "preferredExternalEditor"),
+           let ed = ExternalEditor(rawValue: saved), ed.isInstalled {
+            return ed
+        }
+        return ExternalEditor.allCases.first(where: \.isInstalled) ?? .vscode
+    }
+
+    static func open(filePath: String, line: Int?) {
+        let editor = preferred
+        let lineNum = line ?? 1
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        switch editor {
+        case .vscode:
+            task.arguments = ["code", "-g", "\(filePath):\(lineNum)"]
+        case .cursor:
+            task.arguments = ["cursor", "-g", "\(filePath):\(lineNum)"]
+        case .xcode:
+            task.arguments = ["xed", "-line", "\(lineNum)", filePath]
+        case .sublime:
+            task.arguments = ["subl", "\(filePath):\(lineNum)"]
+        }
+
+        do {
+            try task.run()
+        } catch {
+            NSWorkspace.shared.open(URL(fileURLWithPath: filePath))
+        }
+    }
+}
+
+// MARK: - Review Submission Modal Sheet
+
+@MainActor
+final class ReviewSubmissionSheet: NSWindowController {
+    private let verdictControl = NSSegmentedControl()
+    private let summaryTextView = NSTextView()
+    private let submitButton = NSButton()
+    private let cancelButton = NSButton()
+    private let errorLabel = NSTextField(labelWithString: "")
+    private let spinner = NSProgressIndicator()
+
+    var onSubmit: ((ReviewVerdictEvent, String?) async -> String?)?
+
+    init(pr: PullRequest, palette: Palette?) {
+        let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+                             styleMask: [.titled, .closable],
+                             backing: .buffered, defer: false)
+        sheet.title = "Submit Review — \(pr.repoFullName)#\(pr.number)"
+        super.init(window: sheet)
+        setupUI(pr: pr, palette: palette)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI(pr: PullRequest, palette: Palette?) {
+        guard let window = self.window else { return }
+        let content = NSView()
+        window.contentView = content
+
+        let titleLabel = NSTextField(labelWithString: "Submit Review for \(pr.repoFullName)#\(pr.number)")
+        titleLabel.font = .systemFont(ofSize: 13, weight: .bold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        verdictControl.segmentCount = 3
+        verdictControl.setLabel("✓ Approve", forSegment: 0)
+        verdictControl.setLabel("💬 Comment", forSegment: 1)
+        verdictControl.setLabel("✕ Request Changes", forSegment: 2)
+        verdictControl.selectedSegment = 0
+        verdictControl.target = self
+        verdictControl.action = #selector(verdictChanged)
+        verdictControl.translatesAutoresizingMaskIntoConstraints = false
+
+        summaryTextView.font = .systemFont(ofSize: 12)
+        summaryTextView.isRichText = false
+        summaryTextView.allowsUndo = true
+
+        let scroll = NSScrollView()
+        scroll.documentView = summaryTextView
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .bezelBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        errorLabel.font = .systemFont(ofSize: 11)
+        errorLabel.textColor = .systemRed
+        errorLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+
+        cancelButton.title = "Cancel"
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelClicked)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+
+        submitButton.title = "Approve PR"
+        submitButton.bezelStyle = .rounded
+        submitButton.keyEquivalent = "\r"
+        submitButton.keyEquivalentModifierMask = .command
+        submitButton.target = self
+        submitButton.action = #selector(submitClicked)
+        submitButton.translatesAutoresizingMaskIntoConstraints = false
+
+        content.addSubview(titleLabel)
+        content.addSubview(verdictControl)
+        content.addSubview(scroll)
+        content.addSubview(errorLabel)
+        content.addSubview(spinner)
+        content.addSubview(cancelButton)
+        content.addSubview(submitButton)
+
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+
+            verdictControl.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
+            verdictControl.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            verdictControl.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            verdictControl.heightAnchor.constraint(equalToConstant: 28),
+
+            scroll.topAnchor.constraint(equalTo: verdictControl.bottomAnchor, constant: 12),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            scroll.bottomAnchor.constraint(equalTo: submitButton.topAnchor, constant: -16),
+
+            errorLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            errorLabel.centerYAnchor.constraint(equalTo: submitButton.centerYAnchor),
+            errorLabel.trailingAnchor.constraint(lessThanOrEqualTo: spinner.leadingAnchor, constant: -8),
+
+            spinner.trailingAnchor.constraint(equalTo: cancelButton.leadingAnchor, constant: -8),
+            spinner.centerYAnchor.constraint(equalTo: submitButton.centerYAnchor),
+
+            cancelButton.trailingAnchor.constraint(equalTo: submitButton.leadingAnchor, constant: -8),
+            cancelButton.centerYAnchor.constraint(equalTo: submitButton.centerYAnchor),
+
+            submitButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            submitButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+        ])
+
+        updateSubmitStyle()
+    }
+
+    @objc private func verdictChanged() {
+        updateSubmitStyle()
+    }
+
+    private func updateSubmitStyle() {
+        switch verdictControl.selectedSegment {
+        case 0:
+            submitButton.title = "Approve PR (⌘↵)"
+            submitButton.contentTintColor = .systemGreen
+        case 1:
+            submitButton.title = "Submit Comment (⌘↵)"
+            submitButton.contentTintColor = .systemBlue
+        case 2:
+            submitButton.title = "Request Changes (⌘↵)"
+            submitButton.contentTintColor = .systemRed
+        default:
+            break
+        }
+    }
+
+    @objc private func cancelClicked() {
+        window?.sheetParent?.endSheet(window!, returnCode: .cancel)
+    }
+
+    @objc private func submitClicked() {
+        let verdict: ReviewVerdictEvent
+        switch verdictControl.selectedSegment {
+        case 0: verdict = .approve
+        case 1: verdict = .comment
+        case 2: verdict = .requestChanges
+        default: verdict = .comment
+        }
+
+        let body = summaryTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        if verdict == .requestChanges && body.isEmpty {
+            errorLabel.stringValue = "Message required when requesting changes."
+            return
+        }
+
+        errorLabel.stringValue = ""
+        spinner.startAnimation(nil)
+        submitButton.isEnabled = false
+        cancelButton.isEnabled = false
+
+        Task { @MainActor in
+            let error = await onSubmit?(verdict, body.isEmpty ? nil : body)
+            spinner.stopAnimation(nil)
+            submitButton.isEnabled = true
+            cancelButton.isEnabled = true
+
+            if let error {
+                errorLabel.stringValue = error
+            } else {
+                window?.sheetParent?.endSheet(window!, returnCode: .OK)
+            }
+        }
     }
 }
 
@@ -1367,14 +1957,82 @@ private final class DiffSearchBarView: NSView, NSSearchFieldDelegate {
     @objc private func closeClicked() { onClose?() }
 }
 
-// MARK: - Custom Views for Diff
+// MARK: - Folder Row Cell View for Tree Sidebar
 
-/// Cell view for the changed files list in the left sidebar
+private final class DiffFolderCellView: NSTableCellView {
+    private let chevronView = NSImageView()
+    private let folderIcon = NSImageView()
+    private let nameLabel = NSTextField(labelWithString: "")
+    private let countBadge = NSTextField(labelWithString: "")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setup()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        chevronView.translatesAutoresizingMaskIntoConstraints = false
+        chevronView.imageScaling = .scaleProportionallyDown
+
+        folderIcon.translatesAutoresizingMaskIntoConstraints = false
+        folderIcon.imageScaling = .scaleProportionallyDown
+
+        nameLabel.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        countBadge.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        countBadge.textColor = .secondaryLabelColor
+        countBadge.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(chevronView)
+        addSubview(folderIcon)
+        addSubview(nameLabel)
+        addSubview(countBadge)
+
+        NSLayoutConstraint.activate([
+            chevronView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            chevronView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevronView.widthAnchor.constraint(equalToConstant: 12),
+            chevronView.heightAnchor.constraint(equalToConstant: 12),
+
+            folderIcon.leadingAnchor.constraint(equalTo: chevronView.trailingAnchor, constant: 4),
+            folderIcon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            folderIcon.widthAnchor.constraint(equalToConstant: 14),
+            folderIcon.heightAnchor.constraint(equalToConstant: 14),
+
+            nameLabel.leadingAnchor.constraint(equalTo: folderIcon.trailingAnchor, constant: 6),
+            nameLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: countBadge.leadingAnchor, constant: -4),
+
+            countBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            countBadge.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    func configure(name: String, fileCount: Int, isExpanded: Bool, depth: Int, palette: Palette?) {
+        chevronView.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+        chevronView.contentTintColor = palette?.subtext ?? .secondaryLabelColor
+
+        let folderImg = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(paletteColors: [palette?.yellow ?? .systemOrange]))
+        folderIcon.image = folderImg
+
+        nameLabel.stringValue = name
+        nameLabel.textColor = palette?.text ?? .labelColor
+        countBadge.stringValue = "\(fileCount)"
+    }
+}
+
+// MARK: - File Row Cell View in Left Sidebar
+
 private final class DiffFileCellView: NSTableCellView {
     private let checkButton = NSButton()
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let diffBadge = NSTextField(labelWithString: "")
+    private var leadingConstraint: NSLayoutConstraint?
     private var onToggleViewed: (() -> Void)?
 
     override init(frame: NSRect) {
@@ -1407,8 +2065,11 @@ private final class DiffFileCellView: NSTableCellView {
         addSubview(nameLabel)
         addSubview(diffBadge)
 
+        let lead = checkButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6)
+        self.leadingConstraint = lead
+
         NSLayoutConstraint.activate([
-            checkButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            lead,
             checkButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             checkButton.widthAnchor.constraint(equalToConstant: 16),
             checkButton.heightAnchor.constraint(equalToConstant: 16),
@@ -1431,10 +2092,12 @@ private final class DiffFileCellView: NSTableCellView {
         onToggleViewed?()
     }
 
-    func configure(file: PullRequestFile, isViewed: Bool, palette: Palette?, onToggle: @escaping () -> Void) {
+    func configure(file: PullRequestFile, isViewed: Bool, depth: Int = 0, palette: Palette?, onToggle: @escaping () -> Void) {
         self.onToggleViewed = onToggle
         checkButton.state = isViewed ? .on : .off
         checkButton.contentTintColor = isViewed ? (palette?.green ?? .systemGreen) : .secondaryLabelColor
+
+        leadingConstraint?.constant = CGFloat(6 + depth * 14)
 
         let iconName = file.status.symbol
         let color: NSColor
@@ -1452,7 +2115,7 @@ private final class DiffFileCellView: NSTableCellView {
             .withSymbolConfiguration(cfg)
 
         let nameAttr = NSMutableAttributedString()
-        if !file.directoryPath.isEmpty {
+        if depth == 0 && !file.directoryPath.isEmpty {
             nameAttr.append(NSAttributedString(string: file.directoryPath, attributes: [
                 .font: NSFont.systemFont(ofSize: 10.5, weight: .regular),
                 .foregroundColor: isViewed ? (palette?.subtext ?? .tertiaryLabelColor) : .secondaryLabelColor
@@ -1769,13 +2432,25 @@ private final class SideBySideDiffCellView: NSTableCellView {
     }
 }
 
-/// Cell view for inline review comments overlay on diff lines
+/// Cell view for inline review comments overlay on diff lines with interactive reply composer
 private final class DiffCommentCellView: NSTableCellView {
     private let container = NSView()
     private let authorLabel = NSTextField(labelWithString: "")
     private let verdictBadge = NSTextField(labelWithString: "")
     private let bodyLabel = NSTextField(wrappingLabelWithString: "")
+    private let replyButton = NSButton()
+    private let openBtn = NSButton()
+
+    // Interactive Reply Box
+    private let replyContainer = NSView()
+    private let replyField = NSTextField()
+    private let sendReplyBtn = NSButton()
+    private let cancelReplyBtn = NSButton()
+    private let replySpinner = NSProgressIndicator()
+
     private var commentURL: URL?
+    private var onToggleReplyHandler: ((Bool) -> Void)?
+    private var onSendReplyHandler: ((String) -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -1802,15 +2477,61 @@ private final class DiffCommentCellView: NSTableCellView {
         bodyLabel.isSelectable = true
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let openBtn = NSButton(image: NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: nil) ?? NSImage(), target: self, action: #selector(openCommentURL))
+        replyButton.title = "Reply"
+        replyButton.image = NSImage(systemSymbolName: "arrowshape.turn.up.left", accessibilityDescription: nil)
+        replyButton.bezelStyle = .inline
+        replyButton.font = .systemFont(ofSize: 10, weight: .medium)
+        replyButton.target = self
+        replyButton.action = #selector(replyClicked)
+        replyButton.translatesAutoresizingMaskIntoConstraints = false
+
+        openBtn.image = NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: nil) ?? NSImage()
         openBtn.isBordered = false
         openBtn.toolTip = "Open comment on GitHub"
+        openBtn.target = self
+        openBtn.action = #selector(openCommentURL)
         openBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        // Setup reply container
+        replyContainer.translatesAutoresizingMaskIntoConstraints = false
+        replyContainer.isHidden = true
+
+        replyField.placeholderString = "Write a reply… (⌘Enter to send)"
+        replyField.font = .systemFont(ofSize: 11.5)
+        replyField.target = self
+        replyField.action = #selector(sendReplyClicked)
+        replyField.translatesAutoresizingMaskIntoConstraints = false
+
+        sendReplyBtn.title = "Send"
+        sendReplyBtn.bezelStyle = .rounded
+        sendReplyBtn.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        sendReplyBtn.target = self
+        sendReplyBtn.action = #selector(sendReplyClicked)
+        sendReplyBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        cancelReplyBtn.title = "Cancel"
+        cancelReplyBtn.bezelStyle = .inline
+        cancelReplyBtn.font = .systemFont(ofSize: 10.5)
+        cancelReplyBtn.target = self
+        cancelReplyBtn.action = #selector(cancelReplyClicked)
+        cancelReplyBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        replySpinner.style = .spinning
+        replySpinner.controlSize = .small
+        replySpinner.isDisplayedWhenStopped = false
+        replySpinner.translatesAutoresizingMaskIntoConstraints = false
+
+        replyContainer.addSubview(replyField)
+        replyContainer.addSubview(sendReplyBtn)
+        replyContainer.addSubview(cancelReplyBtn)
+        replyContainer.addSubview(replySpinner)
 
         container.addSubview(authorLabel)
         container.addSubview(verdictBadge)
         container.addSubview(bodyLabel)
+        container.addSubview(replyButton)
         container.addSubview(openBtn)
+        container.addSubview(replyContainer)
         addSubview(container)
 
         NSLayoutConstraint.activate([
@@ -1825,6 +2546,9 @@ private final class DiffCommentCellView: NSTableCellView {
             verdictBadge.leadingAnchor.constraint(equalTo: authorLabel.trailingAnchor, constant: 8),
             verdictBadge.centerYAnchor.constraint(equalTo: authorLabel.centerYAnchor),
 
+            replyButton.trailingAnchor.constraint(equalTo: openBtn.leadingAnchor, constant: -6),
+            replyButton.centerYAnchor.constraint(equalTo: authorLabel.centerYAnchor),
+
             openBtn.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             openBtn.centerYAnchor.constraint(equalTo: authorLabel.centerYAnchor),
             openBtn.widthAnchor.constraint(equalToConstant: 16),
@@ -1833,7 +2557,25 @@ private final class DiffCommentCellView: NSTableCellView {
             bodyLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
             bodyLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
             bodyLabel.topAnchor.constraint(equalTo: authorLabel.bottomAnchor, constant: 4),
-            bodyLabel.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6),
+
+            replyContainer.topAnchor.constraint(equalTo: bodyLabel.bottomAnchor, constant: 6),
+            replyContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            replyContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            replyContainer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6),
+            replyContainer.heightAnchor.constraint(equalToConstant: 28),
+
+            replyField.leadingAnchor.constraint(equalTo: replyContainer.leadingAnchor),
+            replyField.centerYAnchor.constraint(equalTo: replyContainer.centerYAnchor),
+            replyField.trailingAnchor.constraint(equalTo: sendReplyBtn.leadingAnchor, constant: -6),
+
+            sendReplyBtn.trailingAnchor.constraint(equalTo: cancelReplyBtn.leadingAnchor, constant: -4),
+            sendReplyBtn.centerYAnchor.constraint(equalTo: replyContainer.centerYAnchor),
+
+            cancelReplyBtn.trailingAnchor.constraint(equalTo: replySpinner.leadingAnchor, constant: -4),
+            cancelReplyBtn.centerYAnchor.constraint(equalTo: replyContainer.centerYAnchor),
+
+            replySpinner.trailingAnchor.constraint(equalTo: replyContainer.trailingAnchor),
+            replySpinner.centerYAnchor.constraint(equalTo: replyContainer.centerYAnchor),
         ])
     }
 
@@ -1843,8 +2585,41 @@ private final class DiffCommentCellView: NSTableCellView {
         }
     }
 
-    func configure(comment: ReviewComment, searchQuery: String? = nil, palette: Palette?) {
-        commentURL = comment.htmlURL
+    @objc private func replyClicked() {
+        let willOpen = replyContainer.isHidden
+        replyContainer.isHidden = !willOpen
+        onToggleReplyHandler?(willOpen)
+        if willOpen {
+            window?.makeFirstResponder(replyField)
+        }
+    }
+
+    @objc private func cancelReplyClicked() {
+        replyContainer.isHidden = true
+        replyField.stringValue = ""
+        onToggleReplyHandler?(false)
+    }
+
+    @objc private func sendReplyClicked() {
+        let text = replyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        replySpinner.startAnimation(nil)
+        sendReplyBtn.isEnabled = false
+        onSendReplyHandler?(text)
+    }
+
+    func configure(
+        comment: ReviewComment,
+        isReplying: Bool,
+        searchQuery: String? = nil,
+        palette: Palette?,
+        onToggleReply: @escaping (Bool) -> Void,
+        onSendReply: @escaping (String) -> Void
+    ) {
+        self.commentURL = comment.htmlURL
+        self.onToggleReplyHandler = onToggleReply
+        self.onSendReplyHandler = onSendReply
+
         authorLabel.stringValue = "@\(comment.author)"
         authorLabel.textColor = palette?.text ?? .labelColor
 
@@ -1879,5 +2654,9 @@ private final class DiffCommentCellView: NSTableCellView {
             }
         }
         bodyLabel.attributedStringValue = bodyAttr
+
+        replyContainer.isHidden = !isReplying
+        sendReplyBtn.isEnabled = true
+        replySpinner.stopAnimation(nil)
     }
 }

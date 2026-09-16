@@ -55,4 +55,15 @@ public extension GitHubClient {
             return dto.toCommit(ci: ci)
         }
     }
+
+    /// GET /repos/{owner}/{repo}/commits/{sha}
+    /// Fetches files modified in an individual commit.
+    func commitFiles(owner: String, repo: String, sha: String) async throws -> [PullRequestFile] {
+        struct CommitDetailDTO: Decodable, Sendable {
+            let sha: String
+            let files: [PullRequestFileDTO]?
+        }
+        let detail: CommitDetailDTO = try await getValue(path: "/repos/\(owner)/\(repo)/commits/\(sha)")
+        return (detail.files ?? []).map(\.toFile)
+    }
 }

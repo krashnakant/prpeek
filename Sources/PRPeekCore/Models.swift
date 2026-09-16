@@ -77,6 +77,14 @@ public struct PullRequest: Codable, Sendable, Identifiable, Equatable {
     /// this, never on `id` alone.
     public var key: String { "\(accountID):\(id)" }
 
+    public var repoOwner: String {
+        repoFullName.components(separatedBy: "/").first ?? ""
+    }
+
+    public var repoName: String {
+        repoFullName.components(separatedBy: "/").last ?? repoFullName
+    }
+
     // Tolerant decode: the three multi-account/freshness fields are additive, so
     // a cache written before them still loads instead of being quarantined.
     enum CodingKeys: String, CodingKey {

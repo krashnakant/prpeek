@@ -77,18 +77,31 @@ public enum DiffLineKind: Sendable, Equatable {
     case comment
 }
 
+/// A sub-string token within a line, annotated with whether it represents an intra-line modification.
+public struct DiffToken: Sendable, Equatable {
+    public let text: String
+    public let isChanged: Bool
+
+    public init(text: String, isChanged: Bool) {
+        self.text = text
+        self.isChanged = isChanged
+    }
+}
+
 /// A single line in Unified / Inline diff presentation.
 public struct UnifiedDiffLine: Sendable, Equatable {
     public let kind: DiffLineKind
     public let oldLineNumber: Int?
     public let newLineNumber: Int?
     public let text: String
+    public var tokens: [DiffToken]?
 
-    public init(kind: DiffLineKind, oldLineNumber: Int?, newLineNumber: Int?, text: String) {
+    public init(kind: DiffLineKind, oldLineNumber: Int?, newLineNumber: Int?, text: String, tokens: [DiffToken]? = nil) {
         self.kind = kind
         self.oldLineNumber = oldLineNumber
         self.newLineNumber = newLineNumber
         self.text = text
+        self.tokens = tokens
     }
 }
 
@@ -97,13 +110,15 @@ public struct SideBySideDiffCell: Sendable, Equatable {
     public let kind: DiffLineKind
     public let lineNumber: Int?
     public let text: String
+    public var tokens: [DiffToken]?
 
-    public static let empty = SideBySideDiffCell(kind: .context, lineNumber: nil, text: "")
+    public static let empty = SideBySideDiffCell(kind: .context, lineNumber: nil, text: "", tokens: nil)
 
-    public init(kind: DiffLineKind, lineNumber: Int?, text: String) {
+    public init(kind: DiffLineKind, lineNumber: Int?, text: String, tokens: [DiffToken]? = nil) {
         self.kind = kind
         self.lineNumber = lineNumber
         self.text = text
+        self.tokens = tokens
     }
 }
 
@@ -111,8 +126,8 @@ public struct SideBySideDiffCell: Sendable, Equatable {
 public struct SideBySideDiffRow: Sendable, Equatable {
     public let isHunkHeader: Bool
     public let hunkHeaderText: String?
-    public let left: SideBySideDiffCell
-    public let right: SideBySideDiffCell
+    public var left: SideBySideDiffCell
+    public var right: SideBySideDiffCell
 
     public init(isHunkHeader: Bool, hunkHeaderText: String?, left: SideBySideDiffCell, right: SideBySideDiffCell) {
         self.isHunkHeader = isHunkHeader
@@ -152,7 +167,83 @@ public enum DiffParser {
         return (oldStart, oldCount, newStart, newCount)
     }
 
-    /// Parse a unified diff patch string into lines for Inline display.
+    /// Split a line into code tokens (words/numbers, whitespace, punctuation) for fine-grained delta highlighting.
+    public static func tokenize(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+        var tokens: [String] = []
+        var current = ""
+        enum CharKind { case word, space, symbol }
+        var currentKind: CharKind?
+
+        for scalar in text.unicodeScalars {
+            let kind: CharKind
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+                kind = .word
+            } else if CharacterSet.whitespaces.contains(scalar) {
+                kind = .space
+            } else {
+                kind = .symbol
+            }
+
+            if let ck = currentKind, (ck != kind || kind == .symbol) {
+                if !current.isEmpty { tokens.append(current) }
+                current = String(scalar)
+            } else {
+                current.append(String(scalar))
+            }
+            currentKind = kind
+        }
+        if !current.isEmpty { tokens.append(current) }
+        return tokens
+    }
+
+    /// Compute intra-line token difference via Longest Common Subsequence (LCS).
+    public static func computeWordDelta(oldText: String, newText: String) -> (oldTokens: [DiffToken], newTokens: [DiffToken]) {
+        let a = tokenize(oldText)
+        let b = tokenize(newText)
+        let m = a.count
+        let n = b.count
+
+        if m == 0 {
+            return ([], b.map { DiffToken(text: $0, isChanged: true) })
+        }
+        if n == 0 {
+            return (a.map { DiffToken(text: $0, isChanged: true) }, [])
+        }
+
+        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+        for i in 0..<m {
+            for j in 0..<n {
+                if a[i] == b[j] {
+                    dp[i + 1][j + 1] = dp[i][j] + 1
+                } else {
+                    dp[i + 1][j + 1] = max(dp[i + 1][j], dp[i][j + 1])
+                }
+            }
+        }
+
+        var commonA = Set<Int>()
+        var commonB = Set<Int>()
+        var i = m, j = n
+        while i > 0 && j > 0 {
+            if a[i - 1] == b[j - 1] {
+                commonA.insert(i - 1)
+                commonB.insert(j - 1)
+                i -= 1
+                j -= 1
+            } else if dp[i - 1][j] >= dp[i][j - 1] {
+                i -= 1
+            } else {
+                j -= 1
+            }
+        }
+
+        let oldTokens = a.indices.map { DiffToken(text: a[$0], isChanged: !commonA.contains($0)) }
+        let newTokens = b.indices.map { DiffToken(text: b[$0], isChanged: !commonB.contains($0)) }
+        return (oldTokens, newTokens)
+    }
+
+    /// Parse a unified diff patch string into lines for Inline display, with intra-line token highlighting.
     public static func parseUnified(patch: String?) -> [UnifiedDiffLine] {
         guard let patch, !patch.isEmpty else { return [] }
         var lines = patch.components(separatedBy: "\n")
@@ -186,10 +277,38 @@ public enum DiffParser {
                 currentNewLine += 1
             }
         }
+
+        // Intra-line pairing pass for inline diffs:
+        // When a deletion is immediately followed by an addition (or pairs within contiguous change blocks)
+        var idx = 0
+        while idx < result.count {
+            if result[idx].kind == .deletion {
+                let delStart = idx
+                while idx < result.count && result[idx].kind == .deletion { idx += 1 }
+                let delEnd = idx
+                let addStart = idx
+                while idx < result.count && result[idx].kind == .addition { idx += 1 }
+                let addEnd = idx
+
+                let delCount = delEnd - delStart
+                let addCount = addEnd - addStart
+                let pairs = min(delCount, addCount)
+                for p in 0..<pairs {
+                    let dIdx = delStart + p
+                    let aIdx = addStart + p
+                    let delta = computeWordDelta(oldText: result[dIdx].text, newText: result[aIdx].text)
+                    result[dIdx].tokens = delta.oldTokens
+                    result[aIdx].tokens = delta.newTokens
+                }
+            } else {
+                idx += 1
+            }
+        }
+
         return result
     }
 
-    /// Parse a unified diff patch string into paired rows for Side-by-Side display.
+    /// Parse a unified diff patch string into paired rows for Side-by-Side display, with intra-line token highlighting.
     public static func parseSideBySide(patch: String?) -> [SideBySideDiffRow] {
         guard let patch, !patch.isEmpty else { return [] }
         var lines = patch.components(separatedBy: "\n")
@@ -206,8 +325,15 @@ public enum DiffParser {
             guard !pendingDeletions.isEmpty || !pendingAdditions.isEmpty else { return }
             let maxCount = max(pendingDeletions.count, pendingAdditions.count)
             for i in 0..<maxCount {
-                let left = i < pendingDeletions.count ? pendingDeletions[i] : .empty
-                let right = i < pendingAdditions.count ? pendingAdditions[i] : .empty
+                var left = i < pendingDeletions.count ? pendingDeletions[i] : .empty
+                var right = i < pendingAdditions.count ? pendingAdditions[i] : .empty
+
+                if left.kind == .deletion && right.kind == .addition {
+                    let delta = computeWordDelta(oldText: left.text, newText: right.text)
+                    left.tokens = delta.oldTokens
+                    right.tokens = delta.newTokens
+                }
+
                 result.append(SideBySideDiffRow(isHunkHeader: false, hunkHeaderText: nil, left: left, right: right))
             }
             pendingDeletions.removeAll()

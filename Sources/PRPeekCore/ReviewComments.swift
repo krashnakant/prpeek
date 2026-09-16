@@ -30,6 +30,16 @@ public struct ReviewComment: Sendable, Equatable, Identifiable {
         guard id.hasPrefix("c") else { return nil }
         return Int(id.dropFirst())
     }
+
+    /// Extract filename and line number from location (formatted as "path:line").
+    public var fileAndLine: (filename: String, line: Int)? {
+        guard let location else { return nil }
+        guard let colonIdx = location.lastIndex(of: ":") else { return nil }
+        let path = String(location[..<colonIdx])
+        let lineStr = String(location[location.index(after: colonIdx)...])
+        guard let line = Int(lineStr) else { return nil }
+        return (path, line)
+    }
 }
 
 // MARK: - Wire DTOs

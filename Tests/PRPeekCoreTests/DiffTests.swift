@@ -145,4 +145,36 @@ final class DiffTests: XCTestCase {
         XCTAssertEqual(file.changes, 16)
         XCTAssertNotNil(file.patch)
     }
+
+    func test_tokenize() {
+        let tokens = DiffParser.tokenize("let count = 42")
+        XCTAssertEqual(tokens, ["let", " ", "count", " ", "=", " ", "42"])
+
+        let symbols = DiffParser.tokenize("foo.bar(1, 2)")
+        XCTAssertEqual(symbols, ["foo", ".", "bar", "(", "1", ",", " ", "2", ")"])
+    }
+
+    func test_compute_word_delta() {
+        let oldLine = "let total = calculateOld(x)"
+        let newLine = "let total = calculateNew(x)"
+
+        let delta = DiffParser.computeWordDelta(oldText: oldLine, newText: newLine)
+        // Only "calculateOld" and "calculateNew" should be marked as changed
+        let changedOld = delta.oldTokens.filter(\.isChanged).map(\.text)
+        let changedNew = delta.newTokens.filter(\.isChanged).map(\.text)
+
+        XCTAssertEqual(changedOld, ["calculateOld"])
+        XCTAssertEqual(changedNew, ["calculateNew"])
+    }
+
+    func test_review_comment_file_and_line() {
+        let c1 = ReviewComment(id: "c1", author: "alice", verdict: .commented, body: "looks good",
+                               location: "Sources/PRPeek/DiffWindow.swift:142", createdAt: Date(), htmlURL: nil)
+        XCTAssertEqual(c1.fileAndLine?.filename, "Sources/PRPeek/DiffWindow.swift")
+        XCTAssertEqual(c1.fileAndLine?.line, 142)
+
+        let c2 = ReviewComment(id: "r1", author: "bob", verdict: .approved, body: "approved",
+                               location: nil, createdAt: Date(), htmlURL: nil)
+        XCTAssertNil(c2.fileAndLine)
+    }
 }

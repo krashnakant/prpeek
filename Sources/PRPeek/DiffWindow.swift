@@ -2,13 +2,30 @@ import AppKit
 import PRPeekCore
 
 /// Dedicated, high-performance native Diff Viewer window for PRPeek.
-/// Supports both Side-by-Side (Split) and Inline (Unified) diff views with
-/// an instant 1-click toggle and keyboard shortcuts (⌘1 / ⌘2 / Tab).
+/// Supports Side-by-Side and Inline views, intra-line word delta highlighting,
+/// inline review comments overlay, hunk-to-hunk navigation (J/K), and file viewed checkmarks (V).
 @MainActor
 final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     enum ViewMode: Int {
         case sideBySide = 0
         case inline = 1
+    }
+
+    enum DiffTableRow {
+        case unified(UnifiedDiffLine)
+        case sideBySide(SideBySideDiffRow)
+        case reviewComment(ReviewComment)
+
+        var isHunkStart: Bool {
+            switch self {
+            case .unified(let line):
+                return line.kind == .addition || line.kind == .deletion
+            case .sideBySide(let row):
+                return row.left.kind == .deletion || row.right.kind == .addition
+            case .reviewComment:
+                return false
+            }
+        }
     }
 
     private let model: AppModel
@@ -22,6 +39,13 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     // Parsed diff cache for current file
     private var currentUnifiedLines: [UnifiedDiffLine] = []
     private var currentSideBySideRows: [SideBySideDiffRow] = []
+    private var currentFileComments: [ReviewComment] = []
+    private var tableRows: [DiffTableRow] = []
+
+    // Navigation & Viewed State
+    private var hunkRowIndices: [Int] = []
+    private var currentHunkIndex: Int = 0
+    private var viewedFilePaths: Set<String> = []
 
     // UI Elements
     private let splitView = NSSplitView()
@@ -32,6 +56,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     private let titleLabel = NSTextField(labelWithString: "")
     private let repoBadge = makePill()
     private let statsBadge = makePill()
+    private let viewedBadge = makePill()
+    private let hunkBadge = makePill()
     private let modeControl = NSSegmentedControl()
 
     private let currentFilePathLabel = NSTextField(labelWithString: "")
@@ -47,7 +73,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "diffViewMode")
             modeControl.selectedSegment = newValue.rawValue
-            diffTable.reloadData()
+            rebuildTableRows()
         }
     }
 
@@ -60,6 +86,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
     func show(for pr: PullRequest) {
         self.currentPR = pr
+        loadViewed(for: pr)
+
         if window == nil {
             window = makeWindow()
         }
@@ -75,6 +103,16 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         window?.orderOut(nil)
     }
 
+    private func loadViewed(for pr: PullRequest) {
+        let saved = UserDefaults.standard.stringArray(forKey: "viewed_\(pr.key)") ?? []
+        viewedFilePaths = Set(saved)
+    }
+
+    private func saveViewed() {
+        guard let pr = currentPR else { return }
+        UserDefaults.standard.set(Array(viewedFilePaths), forKey: "viewed_\(pr.key)")
+    }
+
     private func updateHeader() {
         guard let pr = currentPR else { return }
         window?.title = "Diff: \(pr.repoFullName)#\(pr.number) — \(pr.title)"
@@ -86,6 +124,26 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         let accent = p?.subtext ?? .secondaryLabelColor
         repoBadge.label.textColor = accent
         repoBadge.view.layer?.backgroundColor = accent.withAlphaComponent(0.14).cgColor
+        updateViewedProgress()
+    }
+
+    private func updateViewedProgress() {
+        guard !allFiles.isEmpty else {
+            viewedBadge.view.isHidden = true
+            return
+        }
+        let viewedCount = allFiles.filter { viewedFilePaths.contains($0.filename) }.count
+        let total = allFiles.count
+        viewedBadge.label.stringValue = "✓ \(viewedCount)/\(total) viewed"
+        let p = model.palette
+        if viewedCount == total {
+            viewedBadge.label.textColor = p?.green ?? .systemGreen
+            viewedBadge.view.layer?.backgroundColor = (p?.green ?? .systemGreen).withAlphaComponent(0.14).cgColor
+        } else {
+            viewedBadge.label.textColor = p?.subtext ?? .secondaryLabelColor
+            viewedBadge.view.layer?.backgroundColor = (p?.subtext ?? .secondaryLabelColor).withAlphaComponent(0.12).cgColor
+        }
+        viewedBadge.view.isHidden = false
     }
 
     private func loadDiff(for pr: PullRequest) {
@@ -93,12 +151,16 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         filteredFiles = []
         selectedFileIndex = 0
         fileTable.reloadData()
+        tableRows = []
         diffTable.reloadData()
 
         emptyStateLabel.stringValue = "Loading diff from GitHub…"
         emptyStateLabel.isHidden = false
         progressIndicator.startAnimation(nil)
         progressIndicator.isHidden = false
+
+        // Load comments asynchronously in background to overlay on diff
+        model.loadComments(for: pr)
 
         if let cached = model.files(for: pr) {
             populateFiles(cached)
@@ -124,6 +186,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         statsBadge.label.textColor = model.palette?.green ?? .systemGreen
         statsBadge.view.layer?.backgroundColor = (model.palette?.green ?? .systemGreen).withAlphaComponent(0.12).cgColor
 
+        updateViewedProgress()
+
         if files.isEmpty {
             emptyStateLabel.stringValue = "No files changed in this PR."
             emptyStateLabel.isHidden = false
@@ -146,9 +210,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         } else {
             currentUnifiedLines = []
             currentSideBySideRows = []
+            tableRows = []
             diffTable.reloadData()
             emptyStateLabel.stringValue = "No matching files."
             emptyStateLabel.isHidden = false
+            hunkBadge.view.isHidden = true
         }
     }
 
@@ -172,6 +238,13 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         currentFileStatusBadge.label.textColor = statusColor
         currentFileStatusBadge.view.layer?.backgroundColor = statusColor.withAlphaComponent(0.14).cgColor
 
+        // Filter comments for this file
+        if let pr = currentPR, let comments = model.comments(for: pr) {
+            currentFileComments = comments.filter { $0.fileAndLine?.filename == file.filename }
+        } else {
+            currentFileComments = []
+        }
+
         if let patch = file.patch {
             currentUnifiedLines = DiffParser.parseUnified(patch: patch)
             currentSideBySideRows = DiffParser.parseSideBySide(patch: patch)
@@ -182,21 +255,112 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             emptyStateLabel.stringValue = "Binary file or changes too large to display directly."
             emptyStateLabel.isHidden = false
         }
-        diffTable.reloadData()
-        if (viewMode == .inline && !currentUnifiedLines.isEmpty) || (viewMode == .sideBySide && !currentSideBySideRows.isEmpty) {
+
+        rebuildTableRows()
+        if !tableRows.isEmpty {
             diffTable.scrollRowToVisible(0)
         }
+    }
+
+    private func rebuildTableRows() {
+        tableRows = []
+        let commentsByLine = Dictionary(grouping: currentFileComments, by: { $0.fileAndLine!.line })
+
+        if viewMode == .inline {
+            for line in currentUnifiedLines {
+                tableRows.append(.unified(line))
+                if let lineNum = line.newLineNumber ?? line.oldLineNumber, let cmts = commentsByLine[lineNum] {
+                    for c in cmts {
+                        tableRows.append(.reviewComment(c))
+                    }
+                }
+            }
+        } else {
+            for row in currentSideBySideRows {
+                tableRows.append(.sideBySide(row))
+                if let lineNum = row.right.lineNumber ?? row.left.lineNumber, let cmts = commentsByLine[lineNum] {
+                    for c in cmts {
+                        tableRows.append(.reviewComment(c))
+                    }
+                }
+            }
+        }
+
+        updateHunks()
+        diffTable.reloadData()
+    }
+
+    private func updateHunks() {
+        hunkRowIndices = []
+        var inHunk = false
+        for (i, row) in tableRows.enumerated() {
+            if row.isHunkStart {
+                if !inHunk {
+                    hunkRowIndices.append(i)
+                    inHunk = true
+                }
+            } else {
+                inHunk = false
+            }
+        }
+        currentHunkIndex = 0
+        updateHunkBadge()
+    }
+
+    private func updateHunkBadge() {
+        if hunkRowIndices.isEmpty {
+            hunkBadge.label.stringValue = "0 hunks"
+            hunkBadge.label.textColor = model.palette?.subtext ?? .secondaryLabelColor
+            hunkBadge.view.layer?.backgroundColor = (model.palette?.subtext ?? .secondaryLabelColor).withAlphaComponent(0.12).cgColor
+        } else {
+            hunkBadge.label.stringValue = "Hunk \(currentHunkIndex + 1) of \(hunkRowIndices.count)"
+            hunkBadge.label.textColor = model.palette?.blue ?? .systemBlue
+            hunkBadge.view.layer?.backgroundColor = (model.palette?.blue ?? .systemBlue).withAlphaComponent(0.14).cgColor
+        }
+        hunkBadge.view.isHidden = false
+    }
+
+    private func jumpToNextHunk() {
+        guard !hunkRowIndices.isEmpty else { return }
+        currentHunkIndex = min(currentHunkIndex + 1, hunkRowIndices.count - 1)
+        diffTable.scrollRowToVisible(hunkRowIndices[currentHunkIndex])
+        updateHunkBadge()
+    }
+
+    private func jumpToPrevHunk() {
+        guard !hunkRowIndices.isEmpty else { return }
+        currentHunkIndex = max(currentHunkIndex - 1, 0)
+        diffTable.scrollRowToVisible(hunkRowIndices[currentHunkIndex])
+        updateHunkBadge()
+    }
+
+    private func toggleViewedCurrentFile() {
+        guard filteredFiles.indices.contains(selectedFileIndex) else { return }
+        let file = filteredFiles[selectedFileIndex]
+        if viewedFilePaths.contains(file.filename) {
+            viewedFilePaths.remove(file.filename)
+        } else {
+            viewedFilePaths.insert(file.filename)
+            // Advance to next unviewed file
+            if let nextIdx = filteredFiles.indices.first(where: { $0 > selectedFileIndex && !viewedFilePaths.contains(filteredFiles[$0].filename) })
+                ?? filteredFiles.indices.first(where: { !viewedFilePaths.contains(filteredFiles[$0].filename) }) {
+                selectFile(at: nextIdx)
+            }
+        }
+        saveViewed()
+        fileTable.reloadData()
+        updateViewedProgress()
     }
 
     // MARK: - Window Construction
 
     private func makeWindow() -> NSWindow {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 720),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.setFrameAutosaveName("PRPeekDiffWindow")
-        w.minSize = NSSize(width: 720, height: 440)
+        w.minSize = NSSize(width: 760, height: 480)
         w.center()
         w.delegate = self
         w.appearance = model.theme.nsAppearance
@@ -224,7 +388,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         splitView.addSubview(rightPane)
 
         // Adjust split position
-        splitView.setPosition(260, ofDividerAt: 0)
+        splitView.setPosition(270, ofDividerAt: 0)
 
         NSLayoutConstraint.activate([
             headerView.topAnchor.constraint(equalTo: content.topAnchor),
@@ -268,6 +432,8 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         bar.addSubview(repoBadge.view)
         bar.addSubview(titleLabel)
         bar.addSubview(statsBadge.view)
+        bar.addSubview(viewedBadge.view)
+        bar.addSubview(hunkBadge.view)
         bar.addSubview(modeControl)
         bar.addSubview(openBrowserBtn)
 
@@ -284,8 +450,14 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
             titleLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: statsBadge.view.leadingAnchor, constant: -10),
 
-            statsBadge.view.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -14),
+            statsBadge.view.trailingAnchor.constraint(equalTo: viewedBadge.view.leadingAnchor, constant: -8),
             statsBadge.view.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+
+            viewedBadge.view.trailingAnchor.constraint(equalTo: hunkBadge.view.leadingAnchor, constant: -8),
+            viewedBadge.view.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+
+            hunkBadge.view.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -12),
+            hunkBadge.view.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
 
             modeControl.trailingAnchor.constraint(equalTo: openBrowserBtn.leadingAnchor, constant: -10),
             modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
@@ -314,7 +486,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         fileFilterField.translatesAutoresizingMaskIntoConstraints = false
 
         fileTable.headerView = nil
-        fileTable.rowHeight = 32
+        fileTable.rowHeight = 34
         fileTable.style = .plain
         fileTable.selectionHighlightStyle = .regular
         let col = NSTableColumn(identifier: .init("file"))
@@ -364,6 +536,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         currentFilePathLabel.isSelectable = true
         currentFilePathLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        let toggleViewedBtn = NSButton(title: "Mark Viewed (V)", target: self, action: #selector(toggleViewedClicked))
+        toggleViewedBtn.bezelStyle = .inline
+        toggleViewedBtn.font = .systemFont(ofSize: 11, weight: .medium)
+        toggleViewedBtn.translatesAutoresizingMaskIntoConstraints = false
+
         let copyPathBtn = NSButton(image: Self.symbol("doc.on.doc"), target: self, action: #selector(copyCurrentPath))
         copyPathBtn.isBordered = false
         copyPathBtn.toolTip = "Copy File Path"
@@ -371,6 +548,7 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
         fileBar.addSubview(currentFileStatusBadge.view)
         fileBar.addSubview(currentFilePathLabel)
+        fileBar.addSubview(toggleViewedBtn)
         fileBar.addSubview(copyPathBtn)
 
         NSLayoutConstraint.activate([
@@ -379,7 +557,10 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
             currentFilePathLabel.leadingAnchor.constraint(equalTo: currentFileStatusBadge.view.trailingAnchor, constant: 8),
             currentFilePathLabel.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
-            currentFilePathLabel.trailingAnchor.constraint(lessThanOrEqualTo: copyPathBtn.leadingAnchor, constant: -8),
+            currentFilePathLabel.trailingAnchor.constraint(lessThanOrEqualTo: toggleViewedBtn.leadingAnchor, constant: -8),
+
+            toggleViewedBtn.trailingAnchor.constraint(equalTo: copyPathBtn.leadingAnchor, constant: -8),
+            toggleViewedBtn.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
 
             copyPathBtn.trailingAnchor.constraint(equalTo: fileBar.trailingAnchor, constant: -10),
             copyPathBtn.centerYAnchor.constraint(equalTo: fileBar.centerYAnchor),
@@ -456,6 +637,10 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         model.open(pr)
     }
 
+    @objc private func toggleViewedClicked() {
+        toggleViewedCurrentFile()
+    }
+
     @objc private func copyCurrentPath() {
         guard filteredFiles.indices.contains(selectedFileIndex) else { return }
         let path = filteredFiles[selectedFileIndex].filename
@@ -485,19 +670,33 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
                 } else if event.charactersIgnoringModifiers == "o" {
                     self.openOnGitHub(); return nil
                 }
-            } else if event.keyCode == 48 { // Tab
-                self.viewMode = self.viewMode == .sideBySide ? .inline : .sideBySide
-                return nil
-            } else if event.keyCode == 30 { // ] -> Next file
-                if self.selectedFileIndex < self.filteredFiles.count - 1 {
-                    self.selectFile(at: self.selectedFileIndex + 1)
+            } else if event.modifierFlags.contains(.option) {
+                if event.keyCode == 125 { // Option+Down
+                    self.jumpToNextHunk(); return nil
+                } else if event.keyCode == 126 { // Option+Up
+                    self.jumpToPrevHunk(); return nil
                 }
-                return nil
-            } else if event.keyCode == 33 { // [ -> Previous file
-                if self.selectedFileIndex > 0 {
-                    self.selectFile(at: self.selectedFileIndex - 1)
+            } else {
+                if event.keyCode == 48 { // Tab
+                    self.viewMode = self.viewMode == .sideBySide ? .inline : .sideBySide
+                    return nil
+                } else if event.charactersIgnoringModifiers == "j" {
+                    self.jumpToNextHunk(); return nil
+                } else if event.charactersIgnoringModifiers == "k" {
+                    self.jumpToPrevHunk(); return nil
+                } else if event.charactersIgnoringModifiers == "v" {
+                    self.toggleViewedCurrentFile(); return nil
+                } else if event.keyCode == 30 { // ] -> Next file
+                    if self.selectedFileIndex < self.filteredFiles.count - 1 {
+                        self.selectFile(at: self.selectedFileIndex + 1)
+                    }
+                    return nil
+                } else if event.keyCode == 33 { // [ -> Previous file
+                    if self.selectedFileIndex > 0 {
+                        self.selectFile(at: self.selectedFileIndex - 1)
+                    }
+                    return nil
                 }
-                return nil
             }
             return event
         }
@@ -509,7 +708,22 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         if tableView === fileTable {
             return filteredFiles.count
         } else {
-            return viewMode == .sideBySide ? currentSideBySideRows.count : currentUnifiedLines.count
+            return tableRows.count
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if tableView === fileTable {
+            return 34
+        }
+        guard tableRows.indices.contains(row) else { return 20 }
+        switch tableRows[row] {
+        case .unified, .sideBySide:
+            return 20
+        case .reviewComment(let comment):
+            // Dynamic comfortable height for comment cards
+            let lines = max(1, comment.body.components(separatedBy: "\n").count)
+            return min(CGFloat(40 + lines * 16), 140)
         }
     }
 
@@ -517,30 +731,84 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         if tableView === fileTable {
             guard filteredFiles.indices.contains(row) else { return nil }
             let file = filteredFiles[row]
+            let isViewed = viewedFilePaths.contains(file.filename)
             let cell = (tableView.makeView(withIdentifier: .init("fileCell"), owner: self) as? DiffFileCellView)
                 ?? DiffFileCellView(frame: .zero)
             cell.identifier = .init("fileCell")
-            cell.configure(file: file, palette: model.palette)
+            cell.configure(file: file, isViewed: isViewed, palette: model.palette) { [weak self] in
+                self?.toggleViewed(for: file)
+            }
             return cell
         } else {
-            if viewMode == .sideBySide {
-                guard currentSideBySideRows.indices.contains(row) else { return nil }
-                let item = currentSideBySideRows[row]
-                let cell = (tableView.makeView(withIdentifier: .init("sbsCell"), owner: self) as? SideBySideDiffCellView)
-                    ?? SideBySideDiffCellView(frame: .zero)
-                cell.identifier = .init("sbsCell")
-                cell.configure(row: item, palette: model.palette)
-                return cell
-            } else {
-                guard currentUnifiedLines.indices.contains(row) else { return nil }
-                let item = currentUnifiedLines[row]
+            guard tableRows.indices.contains(row) else { return nil }
+            switch tableRows[row] {
+            case .unified(let line):
                 let cell = (tableView.makeView(withIdentifier: .init("inlineCell"), owner: self) as? InlineDiffCellView)
                     ?? InlineDiffCellView(frame: .zero)
                 cell.identifier = .init("inlineCell")
-                cell.configure(line: item, palette: model.palette)
+                cell.configure(line: line, palette: model.palette)
+                return cell
+            case .sideBySide(let sbs):
+                let cell = (tableView.makeView(withIdentifier: .init("sbsCell"), owner: self) as? SideBySideDiffCellView)
+                    ?? SideBySideDiffCellView(frame: .zero)
+                cell.identifier = .init("sbsCell")
+                cell.configure(row: sbs, palette: model.palette)
+                return cell
+            case .reviewComment(let comment):
+                let cell = (tableView.makeView(withIdentifier: .init("commentCell"), owner: self) as? DiffCommentCellView)
+                    ?? DiffCommentCellView(frame: .zero)
+                cell.identifier = .init("commentCell")
+                cell.configure(comment: comment, palette: model.palette)
                 return cell
             }
         }
+    }
+
+    private func toggleViewed(for file: PullRequestFile) {
+        if viewedFilePaths.contains(file.filename) {
+            viewedFilePaths.remove(file.filename)
+        } else {
+            viewedFilePaths.insert(file.filename)
+        }
+        saveViewed()
+        fileTable.reloadData()
+        updateViewedProgress()
+    }
+
+    // MARK: - Attributed Text Token Helper
+
+    static func makeAttributedText(tokens: [DiffToken]?, plainText: String, isAddition: Bool, isDeletion: Bool, palette: Palette?) -> NSAttributedString {
+        let baseFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        let textColor = palette?.text ?? .labelColor
+
+        guard let tokens, !tokens.isEmpty else {
+            return NSAttributedString(string: plainText, attributes: [
+                .font: baseFont,
+                .foregroundColor: textColor
+            ])
+        }
+
+        let result = NSMutableAttributedString()
+        let highlightBg: NSColor
+        if isAddition {
+            highlightBg = (palette?.green ?? .systemGreen).withAlphaComponent(0.35)
+        } else if isDeletion {
+            highlightBg = (palette?.red ?? .systemRed).withAlphaComponent(0.35)
+        } else {
+            highlightBg = .clear
+        }
+
+        for token in tokens {
+            var attrs: [NSAttributedString.Key: Any] = [
+                .font: token.isChanged ? NSFont.monospacedSystemFont(ofSize: 11.5, weight: .bold) : baseFont,
+                .foregroundColor: textColor
+            ]
+            if token.isChanged {
+                attrs[.backgroundColor] = highlightBg
+            }
+            result.append(NSAttributedString(string: token.text, attributes: attrs))
+        }
+        return result
     }
 
     // MARK: - Helpers
@@ -580,9 +848,11 @@ final class DiffWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
 
 /// Cell view for the changed files list in the left sidebar
 private final class DiffFileCellView: NSTableCellView {
+    private let checkButton = NSButton()
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let diffBadge = NSTextField(labelWithString: "")
+    private var onToggleViewed: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -591,6 +861,14 @@ private final class DiffFileCellView: NSTableCellView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func setup() {
+        checkButton.setButtonType(.toggle)
+        checkButton.isBordered = false
+        checkButton.image = NSImage(systemSymbolName: "circle", accessibilityDescription: nil)
+        checkButton.alternateImage = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
+        checkButton.target = self
+        checkButton.action = #selector(checkClicked)
+        checkButton.translatesAutoresizingMaskIntoConstraints = false
+
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
 
@@ -601,12 +879,18 @@ private final class DiffFileCellView: NSTableCellView {
         diffBadge.font = .monospacedSystemFont(ofSize: 10, weight: .semibold)
         diffBadge.translatesAutoresizingMaskIntoConstraints = false
 
+        addSubview(checkButton)
         addSubview(iconView)
         addSubview(nameLabel)
         addSubview(diffBadge)
 
         NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            checkButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            checkButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            checkButton.widthAnchor.constraint(equalToConstant: 16),
+            checkButton.heightAnchor.constraint(equalToConstant: 16),
+
+            iconView.leadingAnchor.constraint(equalTo: checkButton.trailingAnchor, constant: 4),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 14),
             iconView.heightAnchor.constraint(equalToConstant: 14),
@@ -620,7 +904,15 @@ private final class DiffFileCellView: NSTableCellView {
         ])
     }
 
-    func configure(file: PullRequestFile, palette: Palette?) {
+    @objc private func checkClicked() {
+        onToggleViewed?()
+    }
+
+    func configure(file: PullRequestFile, isViewed: Bool, palette: Palette?, onToggle: @escaping () -> Void) {
+        self.onToggleViewed = onToggle
+        checkButton.state = isViewed ? .on : .off
+        checkButton.contentTintColor = isViewed ? (palette?.green ?? .systemGreen) : .secondaryLabelColor
+
         let iconName = file.status.symbol
         let color: NSColor
         switch file.status {
@@ -638,14 +930,14 @@ private final class DiffFileCellView: NSTableCellView {
 
         nameLabel.stringValue = (file.filename as NSString).lastPathComponent
         nameLabel.toolTip = file.filename
-        nameLabel.textColor = palette?.text ?? .labelColor
+        nameLabel.textColor = isViewed ? (palette?.subtext ?? .secondaryLabelColor) : (palette?.text ?? .labelColor)
 
         diffBadge.stringValue = "+\(file.additions) -\(file.deletions)"
         diffBadge.textColor = palette?.subtext ?? .secondaryLabelColor
     }
 }
 
-/// Cell view for Inline (Unified) diff row
+/// Cell view for Inline (Unified) diff row with intra-line word delta highlighting
 private final class InlineDiffCellView: NSTableCellView {
     private let oldNumLabel = NSTextField(labelWithString: "")
     private let newNumLabel = NSTextField(labelWithString: "")
@@ -707,19 +999,24 @@ private final class InlineDiffCellView: NSTableCellView {
     func configure(line: UnifiedDiffLine, palette: Palette?) {
         oldNumLabel.stringValue = line.oldLineNumber.map(String.init) ?? ""
         newNumLabel.stringValue = line.newLineNumber.map(String.init) ?? ""
-        codeLabel.stringValue = line.text
+
+        codeLabel.attributedStringValue = DiffWindow.makeAttributedText(
+            tokens: line.tokens,
+            plainText: line.text,
+            isAddition: line.kind == .addition,
+            isDeletion: line.kind == .deletion,
+            palette: palette
+        )
 
         switch line.kind {
         case .addition:
             prefixLabel.stringValue = "+"
             prefixLabel.textColor = palette?.green ?? .systemGreen
-            codeLabel.textColor = palette?.text ?? .labelColor
-            layer?.backgroundColor = (palette?.green ?? .systemGreen).withAlphaComponent(0.13).cgColor
+            layer?.backgroundColor = (palette?.green ?? .systemGreen).withAlphaComponent(0.12).cgColor
         case .deletion:
             prefixLabel.stringValue = "-"
             prefixLabel.textColor = palette?.red ?? .systemRed
-            codeLabel.textColor = palette?.text ?? .labelColor
-            layer?.backgroundColor = (palette?.red ?? .systemRed).withAlphaComponent(0.13).cgColor
+            layer?.backgroundColor = (palette?.red ?? .systemRed).withAlphaComponent(0.12).cgColor
         case .hunkHeader:
             prefixLabel.stringValue = "@@"
             prefixLabel.textColor = palette?.mauve ?? .systemPurple
@@ -728,17 +1025,15 @@ private final class InlineDiffCellView: NSTableCellView {
         case .comment:
             prefixLabel.stringValue = "\\"
             prefixLabel.textColor = .secondaryLabelColor
-            codeLabel.textColor = .secondaryLabelColor
             layer?.backgroundColor = NSColor.clear.cgColor
         case .context:
             prefixLabel.stringValue = ""
-            codeLabel.textColor = palette?.text ?? .labelColor
             layer?.backgroundColor = NSColor.clear.cgColor
         }
     }
 }
 
-/// Cell view for Side-by-Side (Split) diff row
+/// Cell view for Side-by-Side (Split) diff row with intra-line word delta highlighting
 private final class SideBySideDiffCellView: NSTableCellView {
     private let leftNumLabel = NSTextField(labelWithString: "")
     private let leftCodeLabel = NSTextField(labelWithString: "")
@@ -878,30 +1173,134 @@ private final class SideBySideDiffCellView: NSTableCellView {
 
         // Left side
         leftNumLabel.stringValue = row.left.lineNumber.map(String.init) ?? ""
-        leftCodeLabel.stringValue = row.left.text
+        leftCodeLabel.attributedStringValue = DiffWindow.makeAttributedText(
+            tokens: row.left.tokens,
+            plainText: row.left.text,
+            isAddition: false,
+            isDeletion: row.left.kind == .deletion,
+            palette: palette
+        )
+
         if row.left.kind == .deletion {
-            leftBgView.layer?.backgroundColor = (palette?.red ?? .systemRed).withAlphaComponent(0.13).cgColor
-            leftCodeLabel.textColor = palette?.text ?? .labelColor
+            leftBgView.layer?.backgroundColor = (palette?.red ?? .systemRed).withAlphaComponent(0.12).cgColor
         } else if row.left == .empty {
             leftBgView.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.04).cgColor
-            leftCodeLabel.textColor = .clear
         } else {
             leftBgView.layer?.backgroundColor = NSColor.clear.cgColor
-            leftCodeLabel.textColor = palette?.text ?? .labelColor
         }
 
         // Right side
         rightNumLabel.stringValue = row.right.lineNumber.map(String.init) ?? ""
-        rightCodeLabel.stringValue = row.right.text
+        rightCodeLabel.attributedStringValue = DiffWindow.makeAttributedText(
+            tokens: row.right.tokens,
+            plainText: row.right.text,
+            isAddition: row.right.kind == .addition,
+            isDeletion: false,
+            palette: palette
+        )
+
         if row.right.kind == .addition {
-            rightBgView.layer?.backgroundColor = (palette?.green ?? .systemGreen).withAlphaComponent(0.13).cgColor
-            rightCodeLabel.textColor = palette?.text ?? .labelColor
+            rightBgView.layer?.backgroundColor = (palette?.green ?? .systemGreen).withAlphaComponent(0.12).cgColor
         } else if row.right == .empty {
             rightBgView.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.04).cgColor
-            rightCodeLabel.textColor = .clear
         } else {
             rightBgView.layer?.backgroundColor = NSColor.clear.cgColor
-            rightCodeLabel.textColor = palette?.text ?? .labelColor
         }
+    }
+}
+
+/// Cell view for inline review comments overlay on diff lines
+private final class DiffCommentCellView: NSTableCellView {
+    private let container = NSView()
+    private let authorLabel = NSTextField(labelWithString: "")
+    private let verdictBadge = NSTextField(labelWithString: "")
+    private let bodyLabel = NSTextField(wrappingLabelWithString: "")
+    private var commentURL: URL?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setup()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 8
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = NSColor.separatorColor.cgColor
+        container.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        authorLabel.font = .systemFont(ofSize: 11.5, weight: .bold)
+        authorLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        verdictBadge.font = .systemFont(ofSize: 9.5, weight: .semibold)
+        verdictBadge.translatesAutoresizingMaskIntoConstraints = false
+
+        bodyLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
+        bodyLabel.textColor = .labelColor
+        bodyLabel.isSelectable = true
+        bodyLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let openBtn = NSButton(image: NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: nil) ?? NSImage(), target: self, action: #selector(openCommentURL))
+        openBtn.isBordered = false
+        openBtn.toolTip = "Open comment on GitHub"
+        openBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(authorLabel)
+        container.addSubview(verdictBadge)
+        container.addSubview(bodyLabel)
+        container.addSubview(openBtn)
+        addSubview(container)
+
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 48),
+            container.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+            container.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            container.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+
+            authorLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            authorLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+
+            verdictBadge.leadingAnchor.constraint(equalTo: authorLabel.trailingAnchor, constant: 8),
+            verdictBadge.centerYAnchor.constraint(equalTo: authorLabel.centerYAnchor),
+
+            openBtn.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            openBtn.centerYAnchor.constraint(equalTo: authorLabel.centerYAnchor),
+            openBtn.widthAnchor.constraint(equalToConstant: 16),
+            openBtn.heightAnchor.constraint(equalToConstant: 16),
+
+            bodyLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            bodyLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            bodyLabel.topAnchor.constraint(equalTo: authorLabel.bottomAnchor, constant: 4),
+            bodyLabel.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -6),
+        ])
+    }
+
+    @objc private func openCommentURL() {
+        if let url = commentURL {
+            NSWorkspace.shared.openSafeWebURL(url)
+        }
+    }
+
+    func configure(comment: ReviewComment, palette: Palette?) {
+        commentURL = comment.htmlURL
+        authorLabel.stringValue = comment.author
+        authorLabel.textColor = palette?.text ?? .labelColor
+
+        switch comment.verdict {
+        case .changesRequested:
+            verdictBadge.stringValue = "CHANGES REQUESTED"
+            verdictBadge.textColor = palette?.red ?? .systemRed
+        case .approved:
+            verdictBadge.stringValue = "APPROVED"
+            verdictBadge.textColor = palette?.green ?? .systemGreen
+        case .commented:
+            verdictBadge.stringValue = "COMMENT"
+            verdictBadge.textColor = palette?.blue ?? .systemBlue
+        }
+
+        bodyLabel.stringValue = comment.body
+        bodyLabel.textColor = palette?.text ?? .labelColor
     }
 }
